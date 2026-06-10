@@ -1,0 +1,15 @@
+{
+  "name": "Now Playing",
+  "author": "ZazaMastro",
+  "api_version": 1,
+  "flags": [],
+  "publish": {
+    "tags": [
+      "music",
+      "media",
+      "windows"
+    ],
+    "description": "A console-style music companion for Windows: view album art and track progress, control the active media session, and launch your favorite music apps from Decky Loader.",
+    "image": ""
+  }
+}
