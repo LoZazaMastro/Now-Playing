@@ -2,6 +2,11 @@
 
 A console-style Windows music companion for Decky Loader.
 
+<video src="https://github.com/user-attachments/assets/5aed4899-09d0-45ac-a1f0-4a05dc18068e" width="1920" height="1080" controls></video>
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/e90a33c8-feb0-4a97-995f-0ce0b9f3fc81" />
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/7d0baa4a-1181-44ba-9a6a-7e214068c669" />
+
+
 ## Features
 
 - Shows the active Windows media session in the Quick Access Menu.
