@@ -1,0 +1,15 @@
+{
+  "name": "Now Playing",
+  "author": "LoZazaMastro",
+  "api_version": 1,
+  "flags": [],
+  "publish": {
+    "tags": [
+      "music",
+      "media",
+      "windows"
+    ],
+    "description": "A console-style Windows music companion with SMTC controls, fullscreen visuals, optional personal Spotify browsing and a built-in local music library/player.",
+    "image": ""
+  }
+}

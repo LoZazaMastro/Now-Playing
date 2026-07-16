@@ -1,0 +1,1908 @@
+"""Pure parsing of Spotify entity payloads into typed models.
+
+Each entity has two parsers: one for the tier-1 pathfinder GraphQL union and
+one for the tier-2 embed entity. A merge helper combines them, preferring the
+richer tier-1 fields while keeping embed-only fields such as ``preview_url``.
+All functions are I/O-free.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from typing import Any
+
+from spotify_scraper.errors import ParsingError
+from spotify_scraper.models.account import Account
+from spotify_scraper.models.album import Album
+from spotify_scraper.models.artist import Artist
+from spotify_scraper.models.canvas import Canvas
+from spotify_scraper.models.colors import Colors
+from spotify_scraper.models.common import AlbumRef, ArtistRef, Image, ShowRef, UserRef
+from spotify_scraper.models.concert import Concert
+from spotify_scraper.models.credits import CreditArtist, CreditRole, Credits
+from spotify_scraper.models.episode import Episode
+from spotify_scraper.models.lyrics import Lyrics, LyricsLine
+from spotify_scraper.models.playlist import Playlist, PlaylistTrack
+from spotify_scraper.models.search import SearchResults
+from spotify_scraper.models.show import Show
+from spotify_scraper.models.track import Track
+from spotify_scraper.models.transcript import Transcript, TranscriptLine
+from spotify_scraper.models.user import UserProfile
+
+__all__ = [
+    "discography_item_count",
+    "discography_total",
+    "parse_account",
+    "parse_album_embed",
+    "parse_album_gql",
+    "parse_album_tracks_page",
+    "parse_artist_embed",
+    "parse_artist_gql",
+    "parse_canvas",
+    "parse_colors",
+    "parse_concerts",
+    "parse_credits",
+    "parse_discography_releases",
+    "parse_episode_embed",
+    "parse_episode_gql",
+    "parse_lyrics",
+    "parse_playlist_embed",
+    "parse_playlist_gql",
+    "parse_playlist_tracks_page",
+    "parse_related_artists",
+    "parse_search_results",
+    "parse_show_embed",
+    "parse_show_episodes_page",
+    "parse_show_gql",
+    "parse_similar_albums",
+    "parse_track_embed",
+    "parse_track_gql",
+    "parse_transcript",
+    "parse_user_profile",
+    "show_episodes_total",
+]
+
+_UPDATE_HINT = "Spotify may have changed its payload format; check for a library update."
+
+
+def parse_track_gql(data: Mapping[str, Any]) -> Track:
+    """Build a :class:`Track` from a tier-1 pathfinder ``trackUnion``.
+
+    Args:
+        data: The ``body["data"]["trackUnion"]`` object.
+
+    Returns:
+        A fully-populated tier-1 :class:`Track`.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    entity_id = _require_str(data, "id", "trackUnion.id")
+    uri = _require_str(data, "uri", "trackUnion.uri")
+    name = _require_str(data, "name", "trackUnion.name")
+    duration = _require_mapping(data, "duration", "trackUnion.duration")
+    duration_ms = _require_int(
+        duration, "totalMilliseconds", "trackUnion.duration.totalMilliseconds"
+    )
+    playability = _require_mapping(data, "playability", "trackUnion.playability")
+    playable = bool(playability.get("playable", False))
+
+    album_node = _optional_mapping(data, "albumOfTrack")
+    album = _album_ref(album_node) if album_node is not None else None
+    images = _cover_art_images(album_node) if album_node is not None else ()
+    release_date = _iso_date(album_node.get("date")) if album_node is not None else None
+
+    return Track(
+        id=entity_id,
+        uri=uri,
+        name=name,
+        duration_ms=duration_ms,
+        explicit=_gql_explicit(data),
+        playable=playable,
+        preview_url=None,
+        artists=_gql_artists(data),
+        images=images,
+        release_date=release_date,
+        album=album,
+        track_number=_optional_int(data, "trackNumber"),
+        play_count=_play_count(data),
+        share_url=_share_url(data),
+    )
+
+
+def parse_track_embed(entity: Mapping[str, Any]) -> Track:
+    """Build a :class:`Track` from a tier-2 embed entity.
+
+    Args:
+        entity: The ``props.pageProps.state.data.entity`` object.
+
+    Returns:
+        A :class:`Track` with tier-1-only fields left ``None``.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    entity_id = _require_str(entity, "id", "entity.id")
+    uri = _require_str(entity, "uri", "entity.uri")
+    name = _embed_name(entity)
+    duration_ms = _require_int(entity, "duration", "entity.duration")
+
+    return Track(
+        id=entity_id,
+        uri=uri,
+        name=name,
+        duration_ms=duration_ms,
+        explicit=bool(entity.get("isExplicit", False)),
+        playable=bool(entity.get("isPlayable", False)),
+        preview_url=_audio_preview(entity),
+        artists=_embed_artists(entity),
+        images=_visual_identity_images(entity),
+        release_date=_iso_date(entity.get("releaseDate")),
+    )
+
+
+def _merge_tracks(gql: Track, embed: Track) -> Track:
+    """Merge a tier-1 and tier-2 :class:`Track`, preferring tier-1 fields.
+
+    ``preview_url`` and ``release_date`` are taken from the embed track when
+    the pathfinder track lacks them.
+
+    Args:
+        gql: The tier-1 :class:`Track`.
+        embed: The tier-2 :class:`Track`.
+
+    Returns:
+        The enriched :class:`Track`.
+    """
+    return Track(
+        id=gql.id,
+        uri=gql.uri,
+        name=gql.name,
+        duration_ms=gql.duration_ms,
+        explicit=gql.explicit,
+        playable=gql.playable,
+        preview_url=gql.preview_url if gql.preview_url is not None else embed.preview_url,
+        artists=gql.artists,
+        images=gql.images,
+        release_date=gql.release_date if gql.release_date is not None else embed.release_date,
+        album=gql.album,
+        track_number=gql.track_number,
+        play_count=gql.play_count,
+        share_url=gql.share_url,
+    )
+
+
+def _gql_artists(data: Mapping[str, Any]) -> tuple[ArtistRef, ...]:
+    items: list[Mapping[str, Any]] = []
+    for key in ("firstArtist", "otherArtists"):
+        node = _optional_mapping(data, key)
+        if node is None:
+            continue
+        for item in _items(node):
+            items.append(item)
+    refs: list[ArtistRef] = []
+    for item in items:
+        profile = item.get("profile")
+        name = profile.get("name", "") if isinstance(profile, Mapping) else ""
+        refs.append(
+            ArtistRef(
+                name=str(name),
+                uri=str(item.get("uri", "")),
+                id=str(item.get("id", "")),
+            )
+        )
+    return tuple(refs)
+
+
+def _album_ref(album_node: Mapping[str, Any]) -> AlbumRef:
+    return AlbumRef(
+        id=_require_str(album_node, "id", "trackUnion.albumOfTrack.id"),
+        uri=_require_str(album_node, "uri", "trackUnion.albumOfTrack.uri"),
+        name=_require_str(album_node, "name", "trackUnion.albumOfTrack.name"),
+        images=_cover_art_images(album_node),
+    )
+
+
+def _cover_art_images(album_node: Mapping[str, Any]) -> tuple[Image, ...]:
+    cover_art = album_node.get("coverArt")
+    if not isinstance(cover_art, Mapping):
+        return ()
+    sources = cover_art.get("sources")
+    if not isinstance(sources, Sequence):
+        return ()
+    return tuple(
+        Image(url=str(s["url"]), width=s.get("width"), height=s.get("height"))
+        for s in sources
+        if isinstance(s, Mapping) and "url" in s
+    )
+
+
+def _gql_explicit(data: Mapping[str, Any]) -> bool:
+    rating = data.get("contentRating")
+    if not isinstance(rating, Mapping):
+        return False
+    return rating.get("label") == "EXPLICIT"
+
+
+def _play_count(data: Mapping[str, Any]) -> int | None:
+    raw = data.get("playcount")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _share_url(data: Mapping[str, Any]) -> str | None:
+    sharing = data.get("sharingInfo")
+    if not isinstance(sharing, Mapping):
+        return None
+    url = sharing.get("shareUrl")
+    return url if isinstance(url, str) else None
+
+
+def _embed_name(entity: Mapping[str, Any]) -> str:
+    for key in ("title", "name"):
+        value = entity.get(key)
+        if isinstance(value, str) and value:
+            return value
+    raise ParsingError(f"Embed payload missing 'entity.title'/'entity.name'. {_UPDATE_HINT}")
+
+
+def _embed_artists(entity: Mapping[str, Any]) -> tuple[ArtistRef, ...]:
+    artists = entity.get("artists")
+    if not isinstance(artists, Sequence):
+        return ()
+    refs: list[ArtistRef] = []
+    for artist in artists:
+        if not isinstance(artist, Mapping):
+            continue
+        refs.append(ArtistRef(name=str(artist.get("name", "")), uri=str(artist.get("uri", ""))))
+    return tuple(refs)
+
+
+def _audio_preview(entity: Mapping[str, Any]) -> str | None:
+    preview = entity.get("audioPreview")
+    if not isinstance(preview, Mapping):
+        return None
+    url = preview.get("url")
+    return url if isinstance(url, str) else None
+
+
+def _visual_identity_images(entity: Mapping[str, Any]) -> tuple[Image, ...]:
+    visual = entity.get("visualIdentity")
+    if not isinstance(visual, Mapping):
+        return ()
+    images = visual.get("image")
+    if not isinstance(images, Sequence):
+        return ()
+    return tuple(
+        Image(url=str(i["url"]), width=i.get("maxWidth"), height=i.get("maxHeight"))
+        for i in images
+        if isinstance(i, Mapping) and "url" in i
+    )
+
+
+def _iso_date(node: Any) -> datetime | None:
+    if not isinstance(node, Mapping):
+        return None
+    iso = node.get("isoString")
+    if not isinstance(iso, str) or not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _items(node: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    items = node.get("items")
+    if not isinstance(items, Sequence):
+        return []
+    return [item for item in items if isinstance(item, Mapping)]
+
+
+def _require_str(container: Mapping[str, Any], key: str, path: str) -> str:
+    value = container.get(key)
+    if not isinstance(value, str):
+        raise ParsingError(f"Payload missing {path!r}. {_UPDATE_HINT}")
+    return value
+
+
+def _require_int(container: Mapping[str, Any], key: str, path: str) -> int:
+    value = container.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ParsingError(f"Payload missing {path!r}. {_UPDATE_HINT}")
+    return value
+
+
+def _require_mapping(container: Mapping[str, Any], key: str, path: str) -> Mapping[str, Any]:
+    value = container.get(key)
+    if not isinstance(value, Mapping):
+        raise ParsingError(f"Payload missing {path!r}. {_UPDATE_HINT}")
+    return value
+
+
+def _optional_mapping(container: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    value = container.get(key)
+    return value if isinstance(value, Mapping) else None
+
+
+def _optional_int(container: Mapping[str, Any], key: str) -> int | None:
+    value = container.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+# --------------------------------------------------------------------------- #
+# Account
+# --------------------------------------------------------------------------- #
+
+
+def parse_account(payload: Mapping[str, Any]) -> Account:
+    """Build an :class:`Account` from a flat product-state body.
+
+    This is the one place the product-state hyphen→snake key mapping lives
+    (``on-demand``→``on_demand``, ``preferred-locale``→``preferred_locale``,
+    ``selected-language``→``selected_language``). The body is flat and every
+    field is independently optional, so there is no shape gate: a partial or
+    empty object yields an :class:`Account` of ``None`` fields rather than
+    raising. ``on-demand`` is coerced tolerantly because product-state has
+    historically sent booleans as strings (``"1"`` / ``"true"``).
+
+    Args:
+        payload: The decoded product-state body.
+
+    Returns:
+        An :class:`Account` mirroring the wire body.
+    """
+    return Account(
+        product=_optional_str(payload, "product"),
+        catalogue=_optional_str(payload, "catalogue"),
+        country=_optional_str(payload, "country"),
+        on_demand=_account_bool(payload.get("on-demand")),
+        preferred_locale=_optional_str(payload, "preferred-locale"),
+        selected_language=_optional_str(payload, "selected-language"),
+    )
+
+
+def _account_bool(value: Any) -> bool | None:
+    """Coerce a product-state boolean tolerantly: stringy ``"1"``/``"true"`` too.
+
+    Returns ``True`` for ``True`` / ``"1"`` / ``"true"``, ``False`` for
+    ``False`` / ``"0"`` / ``"false"`` (case-insensitive), and ``None`` for an
+    absent or unrecognized value.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true"):
+            return True
+        if lowered in ("0", "false"):
+            return False
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Lyrics
+# --------------------------------------------------------------------------- #
+
+
+def parse_lyrics(payload: Mapping[str, Any]) -> Lyrics:
+    """Build a :class:`Lyrics` from a color-lyrics response.
+
+    Args:
+        payload: The decoded color-lyrics body, i.e. ``{"lyrics": {...}}``.
+
+    Returns:
+        A :class:`Lyrics` whose lines carry millisecond offsets; lines with
+        empty ``words`` are dropped.
+
+    Raises:
+        ParsingError: If the ``lyrics`` object or its ``lines`` are missing.
+    """
+    lyrics = _optional_mapping(payload, "lyrics")
+    if lyrics is None:
+        raise ParsingError(f"Lyrics payload missing 'lyrics'. {_UPDATE_HINT}")
+    raw_lines = lyrics.get("lines")
+    if not isinstance(raw_lines, Sequence):
+        raise ParsingError(f"Lyrics payload missing 'lyrics.lines'. {_UPDATE_HINT}")
+    lines: list[LyricsLine] = []
+    for line in raw_lines:
+        if not isinstance(line, Mapping):
+            continue
+        words = line.get("words")
+        if not isinstance(words, str) or not words:
+            continue
+        lines.append(LyricsLine(start_ms=_start_ms(line.get("startTimeMs")), text=words))
+    return Lyrics(
+        lines=tuple(lines),
+        sync_type=_optional_str(lyrics, "syncType") or "UNSYNCED",
+        provider=_optional_str(lyrics, "provider"),
+        language=_optional_str(lyrics, "language"),
+    )
+
+
+def _start_ms(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Transcript
+# --------------------------------------------------------------------------- #
+
+
+def parse_transcript(payload: Mapping[str, Any]) -> Transcript:
+    """Build a :class:`Transcript` from a decoded transcript envelope.
+
+    Args:
+        payload: The normalized mapping from
+            :func:`spotify_scraper.api.transcripts.decode_envelope`, i.e.
+            ``{"lines": [{"start_ms", "text"}, ...], "language", "provider",
+            "isAutoGenerated"}``.
+
+    Returns:
+        A :class:`Transcript` whose lines carry millisecond offsets; lines with
+        empty ``text`` are dropped.
+
+    Raises:
+        ParsingError: If the ``lines`` container is missing.
+    """
+    raw_lines = payload.get("lines")
+    if not isinstance(raw_lines, Sequence):
+        raise ParsingError(f"Transcript payload missing 'lines'. {_UPDATE_HINT}")
+    lines: list[TranscriptLine] = []
+    for line in raw_lines:
+        if not isinstance(line, Mapping):
+            continue
+        text = line.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        lines.append(TranscriptLine(start_ms=_start_ms(line.get("start_ms")), text=text))
+    return Transcript(
+        lines=tuple(lines),
+        language=_optional_str(payload, "language"),
+        provider=_optional_str(payload, "provider"),
+        is_auto_generated=_optional_bool(payload, "isAutoGenerated"),
+    )
+
+
+def _optional_bool(container: Mapping[str, Any], key: str) -> bool | None:
+    value = container.get(key)
+    return value if isinstance(value, bool) else None
+
+
+# --------------------------------------------------------------------------- #
+# Album
+# --------------------------------------------------------------------------- #
+
+
+def parse_album_gql(union: Mapping[str, Any]) -> Album:
+    """Build an :class:`Album` from a tier-1 ``albumUnion``.
+
+    Args:
+        union: The ``body["data"]["albumUnion"]`` object.
+
+    Returns:
+        A fully-populated tier-1 :class:`Album` including its tracks.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(union, "uri", "albumUnion.uri")
+    name = _require_str(union, "name", "albumUnion.name")
+    album_type = _require_str(union, "type", "albumUnion.type").lower()
+
+    return Album(
+        id=_id_from_uri(uri),
+        uri=uri,
+        name=name,
+        album_type=album_type,
+        images=_cover_art_images(union),
+        release_date=_iso_date(union.get("date")),
+        artists=_artist_items(union.get("artists")),
+        label=_optional_str(union, "label"),
+        total_tracks=_total_count(union.get("tracksV2")),
+        tracks=parse_album_tracks_page(union),
+        copyrights=_copyright_texts(union.get("copyright")),
+        share_url=_share_url(union),
+    )
+
+
+def parse_album_tracks_page(union: Mapping[str, Any]) -> tuple[Track, ...]:
+    """Extract the tracks from a ``getAlbum`` page response's ``albumUnion``.
+
+    Album-page track items carry no ``id``; it is derived from the track uri.
+
+    Args:
+        union: The ``albumUnion`` object (possibly a paged response).
+
+    Returns:
+        A tuple of sparse :class:`Track` objects in album order.
+    """
+    tracks_node = _optional_mapping(union, "tracksV2")
+    if tracks_node is None:
+        return ()
+    tracks: list[Track] = []
+    for item in _items(tracks_node):
+        track_node = _optional_mapping(item, "track")
+        if track_node is None:
+            continue
+        tracks.append(_album_track(track_node))
+    return tuple(tracks)
+
+
+def parse_album_embed(entity: Mapping[str, Any]) -> Album:
+    """Build an :class:`Album` from a tier-2 embed entity.
+
+    Args:
+        entity: The ``props.pageProps.state.data.entity`` object.
+
+    Returns:
+        An :class:`Album` with tier-1-only fields left empty/``None``.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(entity, "uri", "entity.uri")
+    name = _embed_name(entity)
+    subtitle = entity.get("subtitle")
+    artists: tuple[ArtistRef, ...] = ()
+    if isinstance(subtitle, str) and subtitle:
+        artists = (ArtistRef(name=subtitle),)
+    return Album(
+        id=_require_str(entity, "id", "entity.id"),
+        uri=uri,
+        name=name,
+        album_type="album",
+        images=_visual_identity_images(entity),
+        release_date=_iso_date(entity.get("releaseDate")),
+        artists=artists,
+        tracks=_embed_track_list(entity),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Artist
+# --------------------------------------------------------------------------- #
+
+
+def parse_artist_gql(union: Mapping[str, Any]) -> Artist:
+    """Build an :class:`Artist` from a tier-1 ``artistUnion``.
+
+    Args:
+        union: The ``body["data"]["artistUnion"]`` object.
+
+    Returns:
+        A fully-populated tier-1 :class:`Artist`.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(union, "uri", "artistUnion.uri")
+    profile = _require_mapping(union, "profile", "artistUnion.profile")
+    name = _require_str(profile, "name", "artistUnion.profile.name")
+    discography = _optional_mapping(union, "discography") or {}
+
+    return Artist(
+        id=_optional_str(union, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        images=_avatar_images(union),
+        biography=_biography(profile),
+        followers=_stat_int(union, "followers"),
+        monthly_listeners=_stat_int(union, "monthlyListeners"),
+        world_rank=_world_rank(union),
+        top_tracks=_artist_top_tracks(discography.get("topTracks")),
+        albums=_artist_releases(discography.get("albums")),
+        singles=_artist_releases(discography.get("singles")),
+        external_links=_external_links(profile),
+        share_url=_share_url(union),
+    )
+
+
+def parse_artist_embed(entity: Mapping[str, Any]) -> Artist:
+    """Build an :class:`Artist` from a tier-2 embed entity.
+
+    Args:
+        entity: The ``props.pageProps.state.data.entity`` object.
+
+    Returns:
+        An :class:`Artist` with tier-1-only fields left empty/``None``.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(entity, "uri", "entity.uri")
+    name = _embed_name(entity)
+    return Artist(
+        id=_require_str(entity, "id", "entity.id"),
+        uri=uri,
+        name=name,
+        images=_visual_identity_images(entity),
+        top_tracks=_embed_track_list(entity),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Playlist
+# --------------------------------------------------------------------------- #
+
+
+def parse_playlist_gql(union: Mapping[str, Any], *, max_tracks: int | None = None) -> Playlist:
+    """Build a :class:`Playlist` from a tier-1 ``playlistV2`` page.
+
+    Only the tracks present in this union page are parsed; the client drives
+    any multi-page loop via :func:`parse_playlist_tracks_page`. ``total_tracks``
+    always reflects ``content.totalCount``.
+
+    Args:
+        union: The ``body["data"]["playlistV2"]`` object.
+        max_tracks: Optional cap on tracks taken from this page.
+
+    Returns:
+        A tier-1 :class:`Playlist` (single page of tracks).
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(union, "uri", "playlistV2.uri")
+    name = _require_str(union, "name", "playlistV2.name")
+    content = _optional_mapping(union, "content")
+    tracks = parse_playlist_tracks_page(union)
+    if max_tracks is not None:
+        tracks = tracks[:max_tracks]
+
+    return Playlist(
+        id=_id_from_uri(uri),
+        uri=uri,
+        name=name,
+        description=_optional_str(union, "description") or "",
+        owner=_owner_ref(union.get("ownerV2")),
+        followers=_optional_int(union, "followers"),
+        images=_playlist_images(union),
+        total_tracks=_total_count(content) if content is not None else None,
+        tracks=tracks,
+        share_url=_share_url(union),
+    )
+
+
+def parse_playlist_tracks_page(union: Mapping[str, Any]) -> tuple[PlaylistTrack, ...]:
+    """Extract playlist items from a ``fetchPlaylist`` page's ``playlistV2``.
+
+    Items whose ``itemV2.data.__typename`` is not ``"Track"`` (local files,
+    episodes) are skipped.
+
+    Args:
+        union: The ``playlistV2`` object (possibly a paged response).
+
+    Returns:
+        A tuple of :class:`PlaylistTrack` objects.
+    """
+    content = _optional_mapping(union, "content")
+    if content is None:
+        return ()
+    entries: list[PlaylistTrack] = []
+    for item in _items(content):
+        item_v2 = _optional_mapping(item, "itemV2")
+        if item_v2 is None:
+            continue
+        data = _optional_mapping(item_v2, "data")
+        if data is None or data.get("__typename") != "Track":
+            continue
+        entries.append(
+            PlaylistTrack(
+                track=_playlist_track(data),
+                added_at=_iso_date(item.get("addedAt")),
+                added_by=_owner_ref(item.get("addedBy")),
+            )
+        )
+    return tuple(entries)
+
+
+def parse_playlist_embed(entity: Mapping[str, Any]) -> Playlist:
+    """Build a :class:`Playlist` from a tier-2 embed entity.
+
+    Args:
+        entity: The ``props.pageProps.state.data.entity`` object.
+
+    Returns:
+        A :class:`Playlist` whose tracks carry no ``added_at``.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(entity, "uri", "entity.uri")
+    name = _embed_name(entity)
+    subtitle = entity.get("subtitle")
+    owner = UserRef(name=subtitle) if isinstance(subtitle, str) and subtitle else None
+    tracks = tuple(PlaylistTrack(track=track) for track in _embed_track_list(entity))
+    return Playlist(
+        id=_require_str(entity, "id", "entity.id"),
+        uri=uri,
+        name=name,
+        owner=owner,
+        images=_visual_identity_images(entity),
+        tracks=tracks,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Episode
+# --------------------------------------------------------------------------- #
+
+
+def parse_episode_gql(union: Mapping[str, Any]) -> Episode:
+    """Build an :class:`Episode` from a tier-1 ``episodeUnionV2``.
+
+    Args:
+        union: The ``body["data"]["episodeUnionV2"]`` object.
+
+    Returns:
+        A fully-populated tier-1 :class:`Episode`.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(union, "uri", "episodeUnionV2.uri")
+    name = _require_str(union, "name", "episodeUnionV2.name")
+    duration = _require_mapping(union, "duration", "episodeUnionV2.duration")
+    duration_ms = _require_int(
+        duration, "totalMilliseconds", "episodeUnionV2.duration.totalMilliseconds"
+    )
+    playability = _optional_mapping(union, "playability") or {}
+
+    return Episode(
+        id=_optional_str(union, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        duration_ms=duration_ms,
+        description=_optional_str(union, "description") or "",
+        explicit=_gql_explicit(union),
+        playable=bool(playability.get("playable", False)),
+        release_date=_iso_date(union.get("releaseDate")),
+        images=_cover_art_images(union),
+        preview_url=_preview_playback(union),
+        show=_show_ref(union.get("podcastV2")),
+        share_url=_share_url(union),
+    )
+
+
+def parse_episode_embed(entity: Mapping[str, Any]) -> Episode:
+    """Build an :class:`Episode` from a tier-2 embed entity.
+
+    Args:
+        entity: The ``props.pageProps.state.data.entity`` object.
+
+    Returns:
+        An :class:`Episode` with tier-1-only fields left ``None``.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(entity, "uri", "entity.uri")
+    name = _embed_name(entity)
+    duration_ms = _require_int(entity, "duration", "entity.duration")
+    subtitle = entity.get("subtitle")
+    related = entity.get("relatedEntityUri")
+    show: ShowRef | None = None
+    if isinstance(subtitle, str) and subtitle and isinstance(related, str) and related:
+        show = ShowRef(id=_id_from_uri(related), uri=related, name=subtitle)
+    return Episode(
+        id=_require_str(entity, "id", "entity.id"),
+        uri=uri,
+        name=name,
+        duration_ms=duration_ms,
+        description=_optional_str(entity, "description") or "",
+        explicit=_embed_explicit(entity),
+        playable=bool(entity.get("isPlayable", False)),
+        release_date=_iso_date(entity.get("releaseDate")),
+        images=_visual_identity_images(entity),
+        preview_url=_audio_preview(entity),
+        show=show,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Show
+# --------------------------------------------------------------------------- #
+
+
+def parse_show_gql(union: Mapping[str, Any]) -> Show:
+    """Build a :class:`Show` from a tier-1 ``podcastUnionV2``.
+
+    Args:
+        union: The ``body["data"]["podcastUnionV2"]`` object.
+
+    Returns:
+        A fully-populated tier-1 :class:`Show`.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    uri = _require_str(union, "uri", "podcastUnionV2.uri")
+    name = _require_str(union, "name", "podcastUnionV2.name")
+    episodes_node = _optional_mapping(union, "episodesV2")
+
+    return Show(
+        id=_optional_str(union, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        description=_optional_str(union, "description") or "",
+        publisher=_publisher_name(union.get("publisher")),
+        media_type=_optional_str(union, "mediaType"),
+        images=_cover_art_images(union),
+        total_episodes=_total_count(episodes_node) if episodes_node is not None else None,
+        # The metadata query's episodesV2 carries only a uri-only stub, which
+        # would parse into a phantom episode (empty name, 0 duration). The real
+        # listing is fetched separately via queryPodcastEpisodes, so leave this
+        # empty rather than emit a bogus entry on the degraded path.
+        episodes=(),
+        topics=_topic_titles(union.get("topics")),
+        rating=_average_rating(union.get("rating")),
+        share_url=_share_url(union),
+    )
+
+
+def parse_show_embed(entity: Mapping[str, Any]) -> Show:
+    """Build a :class:`Show` from a tier-2 embed entity.
+
+    The show embed page carries the latest-episode envelope, so the show name
+    and uri are taken from the episode's ``subtitle`` and ``relatedEntityUri``;
+    no episode listing is fabricated.
+
+    Args:
+        entity: The ``props.pageProps.state.data.entity`` object.
+
+    Returns:
+        A :class:`Show` with tier-1-only fields left ``None`` and no episodes.
+
+    Raises:
+        ParsingError: If a required key is missing, naming the JSON path.
+    """
+    subtitle = entity.get("subtitle")
+    related = entity.get("relatedEntityUri")
+    if isinstance(subtitle, str) and subtitle and isinstance(related, str) and related:
+        return Show(
+            id=_id_from_uri(related),
+            uri=related,
+            name=subtitle,
+            images=_related_entity_images(entity),
+        )
+    uri = _require_str(entity, "uri", "entity.uri")
+    return Show(
+        id=_require_str(entity, "id", "entity.id"),
+        uri=uri,
+        name=_embed_name(entity),
+        images=_visual_identity_images(entity),
+    )
+
+
+def parse_show_episodes_page(union: Mapping[str, Any]) -> tuple[Episode, ...]:
+    """Parse one page of a ``queryPodcastEpisodes`` ``podcastUnionV2`` response.
+
+    Args:
+        union: The ``body["data"]["podcastUnionV2"]`` object of an episodes page.
+
+    Returns:
+        The page's episodes (empty if the page carries none).
+    """
+    return _show_episodes(_optional_mapping(union, "episodesV2"))
+
+
+def show_episodes_total(union: Mapping[str, Any]) -> int | None:
+    """Return the show's full episode count from an episodes-page response.
+
+    Args:
+        union: The ``body["data"]["podcastUnionV2"]`` object of an episodes page.
+
+    Returns:
+        The ``episodesV2.totalCount`` when present, else ``None``.
+    """
+    node = _optional_mapping(union, "episodesV2")
+    return _total_count(node) if node is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# Search
+# --------------------------------------------------------------------------- #
+
+
+def parse_search_results(union: Mapping[str, Any], *, query: str) -> SearchResults:
+    """Build :class:`SearchResults` from a ``searchDesktop`` ``searchV2`` union.
+
+    The nesting is not uniform: ``tracksV2`` items wrap the entity at
+    ``items[].item.data`` while every other section wraps it at ``items[].data``.
+    Empty or absent sections yield empty tuples; a section that is not a mapping
+    or an item missing its ``uri``/``name`` is skipped rather than raising, so a
+    zero-hit search returns an empty :class:`SearchResults`, never an error.
+
+    Args:
+        union: The ``body["data"]["searchV2"]`` object.
+        query: The original search term, echoed back on the model.
+
+    Returns:
+        A :class:`SearchResults` populated from the present sections.
+
+    Raises:
+        ParsingError: If ``union`` is not a mapping.
+    """
+    if not isinstance(union, Mapping):
+        raise ParsingError(f"Search response 'searchV2' was not an object. {_UPDATE_HINT}")
+    return SearchResults(
+        query=query,
+        tracks=_search_tracks(union.get("tracksV2")),
+        artists=_search_artists(union.get("artists")),
+        albums=_search_albums(union.get("albumsV2")),
+        playlists=_search_playlists(union.get("playlists")),
+        shows=_search_shows(union.get("podcasts")),
+        episodes=_search_episodes(union.get("episodes")),
+        total=_total_count(_optional_mapping(union, "tracksV2")),
+    )
+
+
+def _search_section_entities(node: Any, *, nested: bool) -> list[Mapping[str, Any]]:
+    """Return each section item's entity node (``items[].data`` or nested)."""
+    if not isinstance(node, Mapping):
+        return []
+    entities: list[Mapping[str, Any]] = []
+    for item in _items(node):
+        wrapper = _optional_mapping(item, "item") if nested else item
+        if wrapper is None:
+            continue
+        data = _optional_mapping(wrapper, "data")
+        if data is not None:
+            entities.append(data)
+    return entities
+
+
+def _search_tracks(node: Any) -> tuple[Track, ...]:
+    tracks: list[Track] = []
+    for data in _search_section_entities(node, nested=True):
+        track = _search_track(data)
+        if track is not None:
+            tracks.append(track)
+    return tuple(tracks)
+
+
+def _search_track(data: Mapping[str, Any]) -> Track | None:
+    uri = _optional_str(data, "uri")
+    name = _optional_str(data, "name")
+    if not uri or not name:
+        return None
+    duration = _optional_mapping(data, "duration") or {}
+    playability = _optional_mapping(data, "playability") or {}
+    album_node = _optional_mapping(data, "albumOfTrack")
+    album = _search_album_ref(album_node) if album_node is not None else None
+    images = _cover_art_images(album_node) if album_node is not None else ()
+    return Track(
+        id=_optional_str(data, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        duration_ms=_optional_int(duration, "totalMilliseconds") or 0,
+        explicit=_gql_explicit(data),
+        playable=bool(playability.get("playable", False)),
+        preview_url=None,
+        artists=_artist_items(data.get("artists")),
+        images=images,
+        release_date=None,
+        album=album,
+    )
+
+
+def _search_album_ref(album_node: Mapping[str, Any]) -> AlbumRef | None:
+    """Lenient :class:`AlbumRef` for a search hit: ``None`` on a partial album.
+
+    Unlike :func:`_album_ref_lenient` (which raises, as its playlist-track caller
+    requires), a search track must never abort the whole result set just because
+    one hit's ``albumOfTrack`` is present but missing its ``uri``/``name``.
+    """
+    uri = _optional_str(album_node, "uri")
+    name = _optional_str(album_node, "name")
+    if not uri or not name:
+        return None
+    return AlbumRef(
+        id=_optional_str(album_node, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        images=_cover_art_images(album_node),
+    )
+
+
+def _search_artists(node: Any) -> tuple[Artist, ...]:
+    artists: list[Artist] = []
+    for data in _search_section_entities(node, nested=False):
+        artist = _search_artist(data)
+        if artist is not None:
+            artists.append(artist)
+    return tuple(artists)
+
+
+def _search_artist(data: Mapping[str, Any]) -> Artist | None:
+    uri = _optional_str(data, "uri")
+    profile = _optional_mapping(data, "profile") or {}
+    name = _optional_str(profile, "name")
+    if not uri or not name:
+        return None
+    return Artist(
+        id=_optional_str(data, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        images=_avatar_images(data),
+    )
+
+
+def _search_albums(node: Any) -> tuple[AlbumRef, ...]:
+    albums: list[AlbumRef] = []
+    for data in _search_section_entities(node, nested=False):
+        uri = _optional_str(data, "uri")
+        name = _optional_str(data, "name")
+        if not uri or not name:
+            continue
+        albums.append(
+            AlbumRef(
+                id=_optional_str(data, "id") or _id_from_uri(uri),
+                uri=uri,
+                name=name,
+                images=_cover_art_images(data),
+            )
+        )
+    return tuple(albums)
+
+
+def _search_playlists(node: Any) -> tuple[Playlist, ...]:
+    playlists: list[Playlist] = []
+    for data in _search_section_entities(node, nested=False):
+        uri = _optional_str(data, "uri")
+        name = _optional_str(data, "name")
+        if not uri or not name:
+            continue
+        playlists.append(
+            Playlist(
+                id=_optional_str(data, "id") or _id_from_uri(uri),
+                uri=uri,
+                name=name,
+                description=_optional_str(data, "description") or "",
+                owner=_owner_ref(data.get("ownerV2")),
+                images=_playlist_images(data),
+            )
+        )
+    return tuple(playlists)
+
+
+def _search_shows(node: Any) -> tuple[ShowRef, ...]:
+    shows: list[ShowRef] = []
+    for data in _search_section_entities(node, nested=False):
+        uri = _optional_str(data, "uri")
+        name = _optional_str(data, "name")
+        if not uri or not name:
+            continue
+        shows.append(
+            ShowRef(
+                id=_optional_str(data, "id") or _id_from_uri(uri),
+                uri=uri,
+                name=name,
+                publisher=_publisher_name(data.get("publisher")),
+                images=_cover_art_images(data),
+            )
+        )
+    return tuple(shows)
+
+
+def _search_episodes(node: Any) -> tuple[Episode, ...]:
+    episodes: list[Episode] = []
+    for data in _search_section_entities(node, nested=False):
+        episode = _sparse_episode(data)
+        if episode is None:
+            continue
+        if not episode.name:
+            continue
+        episodes.append(episode)
+    return tuple(episodes)
+
+
+# --------------------------------------------------------------------------- #
+# Private helpers
+# --------------------------------------------------------------------------- #
+
+
+def _id_from_uri(uri: str) -> str:
+    """Return the entity id (last colon-delimited segment) of a Spotify uri."""
+    return uri.rsplit(":", 1)[-1]
+
+
+def _optional_str(container: Mapping[str, Any], key: str) -> str | None:
+    value = container.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _total_count(node: Mapping[str, Any] | None) -> int | None:
+    if node is None:
+        return None
+    return _optional_int(node, "totalCount")
+
+
+def _artist_items(node: Any) -> tuple[ArtistRef, ...]:
+    """Build artist refs from an ``{items: [{profile, uri, id?}]}`` node."""
+    if not isinstance(node, Mapping):
+        return ()
+    refs: list[ArtistRef] = []
+    for item in _items(node):
+        profile = item.get("profile")
+        name = profile.get("name", "") if isinstance(profile, Mapping) else ""
+        refs.append(
+            ArtistRef(
+                name=str(name),
+                uri=str(item.get("uri", "")),
+                id=str(item.get("id", "")),
+            )
+        )
+    return tuple(refs)
+
+
+def _copyright_texts(node: Any) -> tuple[str, ...]:
+    if not isinstance(node, Mapping):
+        return ()
+    texts: list[str] = []
+    for item in _items(node):
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            texts.append(text)
+    return tuple(texts)
+
+
+def _album_track(track_node: Mapping[str, Any]) -> Track:
+    """Build a sparse album-page :class:`Track` (id derived from uri)."""
+    uri = _require_str(track_node, "uri", "albumUnion.tracksV2.items[].track.uri")
+    name = _require_str(track_node, "name", "albumUnion.tracksV2.items[].track.name")
+    duration = _optional_mapping(track_node, "duration") or {}
+    playability = _optional_mapping(track_node, "playability") or {}
+    return Track(
+        id=_id_from_uri(uri),
+        uri=uri,
+        name=name,
+        duration_ms=_optional_int(duration, "totalMilliseconds") or 0,
+        explicit=_gql_explicit(track_node),
+        playable=bool(playability.get("playable", False)),
+        preview_url=None,
+        artists=_artist_items(track_node.get("artists")),
+        images=(),
+        release_date=None,
+        track_number=_optional_int(track_node, "trackNumber"),
+        play_count=_play_count(track_node),
+    )
+
+
+def _playlist_track(data: Mapping[str, Any]) -> Track:
+    """Build a :class:`Track` from a playlist ``itemV2.data`` node."""
+    uri = _require_str(data, "uri", "playlistV2.content.items[].itemV2.data.uri")
+    name = _require_str(data, "name", "playlistV2.content.items[].itemV2.data.name")
+    duration = _optional_mapping(data, "trackDuration") or {}
+    playability = _optional_mapping(data, "playability") or {}
+    album_node = _optional_mapping(data, "albumOfTrack")
+    album = _album_ref_lenient(album_node) if album_node is not None else None
+    images = _cover_art_images(album_node) if album_node is not None else ()
+    return Track(
+        id=_id_from_uri(uri),
+        uri=uri,
+        name=name,
+        duration_ms=_optional_int(duration, "totalMilliseconds") or 0,
+        explicit=_gql_explicit(data),
+        playable=bool(playability.get("playable", False)),
+        preview_url=None,
+        artists=_artist_items(data.get("artists")),
+        images=images,
+        release_date=None,
+        album=album,
+        track_number=_optional_int(data, "trackNumber"),
+        play_count=_play_count(data),
+    )
+
+
+def _album_ref_lenient(album_node: Mapping[str, Any]) -> AlbumRef:
+    """Build an :class:`AlbumRef`, deriving ``id`` from the uri when absent."""
+    uri = _require_str(album_node, "uri", "albumOfTrack.uri")
+    return AlbumRef(
+        id=_optional_str(album_node, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=_require_str(album_node, "name", "albumOfTrack.name"),
+        images=_cover_art_images(album_node),
+    )
+
+
+def _embed_track_list(entity: Mapping[str, Any]) -> tuple[Track, ...]:
+    """Build sparse tracks from an embed ``trackList`` (skip non-track rows)."""
+    track_list = entity.get("trackList")
+    if not isinstance(track_list, Sequence):
+        return ()
+    tracks: list[Track] = []
+    for row in track_list:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("entityType") not in (None, "track"):
+            continue
+        uri = row.get("uri")
+        name = row.get("title") or row.get("name")
+        if not isinstance(uri, str) or not uri or not isinstance(name, str) or not name:
+            continue
+        subtitle = row.get("subtitle")
+        artists: tuple[ArtistRef, ...] = ()
+        if isinstance(subtitle, str) and subtitle:
+            artists = tuple(
+                ArtistRef(name=part.strip()) for part in subtitle.split(",") if part.strip()
+            )
+        duration = row.get("duration")
+        tracks.append(
+            Track(
+                id=_id_from_uri(uri),
+                uri=uri,
+                name=name,
+                duration_ms=duration
+                if isinstance(duration, int) and not isinstance(duration, bool)
+                else 0,
+                explicit=bool(row.get("isExplicit", False)),
+                playable=bool(row.get("isPlayable", False)),
+                preview_url=_audio_preview(row),
+                artists=artists,
+                images=(),
+                release_date=None,
+            )
+        )
+    return tuple(tracks)
+
+
+def _avatar_images(union: Mapping[str, Any]) -> tuple[Image, ...]:
+    visuals = _optional_mapping(union, "visuals")
+    if visuals is None:
+        return ()
+    avatar = _optional_mapping(visuals, "avatarImage")
+    if avatar is None:
+        return ()
+    sources = avatar.get("sources")
+    if not isinstance(sources, Sequence):
+        return ()
+    return tuple(
+        Image(url=str(s["url"]), width=s.get("width"), height=s.get("height"))
+        for s in sources
+        if isinstance(s, Mapping) and "url" in s
+    )
+
+
+def _biography(profile: Mapping[str, Any]) -> str | None:
+    bio = _optional_mapping(profile, "biography")
+    if bio is None:
+        return None
+    text = bio.get("text")
+    return text if isinstance(text, str) and text else None
+
+
+def _external_links(profile: Mapping[str, Any]) -> tuple[str, ...]:
+    links = _optional_mapping(profile, "externalLinks")
+    if links is None:
+        return ()
+    urls: list[str] = []
+    for item in _items(links):
+        url = item.get("url")
+        if isinstance(url, str) and url:
+            urls.append(url)
+    return tuple(urls)
+
+
+def _stat_int(union: Mapping[str, Any], key: str) -> int | None:
+    stats = _optional_mapping(union, "stats")
+    if stats is None:
+        return None
+    return _optional_int(stats, key)
+
+
+def _world_rank(union: Mapping[str, Any]) -> int | None:
+    rank = _stat_int(union, "worldRank")
+    return rank if rank else None
+
+
+def _artist_top_tracks(node: Any) -> tuple[Track, ...]:
+    if not isinstance(node, Mapping):
+        return ()
+    tracks: list[Track] = []
+    for item in _items(node):
+        track_node = _optional_mapping(item, "track")
+        if track_node is None:
+            continue
+        tracks.append(_artist_top_track(track_node))
+    return tuple(tracks)
+
+
+def _artist_top_track(track_node: Mapping[str, Any]) -> Track:
+    uri = _require_str(track_node, "uri", "artistUnion.discography.topTracks.items[].track.uri")
+    name = _require_str(track_node, "name", "artistUnion.discography.topTracks.items[].track.name")
+    duration = _optional_mapping(track_node, "duration") or {}
+    playability = _optional_mapping(track_node, "playability") or {}
+    album_node = _optional_mapping(track_node, "albumOfTrack")
+    images = _cover_art_images(album_node) if album_node is not None else ()
+    return Track(
+        id=_optional_str(track_node, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name,
+        duration_ms=_optional_int(duration, "totalMilliseconds") or 0,
+        explicit=_gql_explicit(track_node),
+        playable=bool(playability.get("playable", False)),
+        preview_url=None,
+        artists=_artist_items(track_node.get("artists")),
+        images=images,
+        release_date=None,
+        play_count=_play_count(track_node),
+    )
+
+
+def _artist_releases(node: Any) -> tuple[AlbumRef, ...]:
+    if not isinstance(node, Mapping):
+        return ()
+    refs: list[AlbumRef] = []
+    for item in _items(node):
+        releases = _optional_mapping(item, "releases")
+        if releases is None:
+            continue
+        release_items = _items(releases)
+        if not release_items:
+            continue
+        release = release_items[0]
+        uri = release.get("uri")
+        name = release.get("name")
+        if not isinstance(uri, str) or not uri or not isinstance(name, str) or not name:
+            continue
+        refs.append(
+            AlbumRef(
+                id=_optional_str(release, "id") or _id_from_uri(uri),
+                uri=uri,
+                name=name,
+                images=_cover_art_images(release),
+            )
+        )
+    return tuple(refs)
+
+
+def _owner_ref(node: Any) -> UserRef | None:
+    if not isinstance(node, Mapping):
+        return None
+    data = _optional_mapping(node, "data")
+    if data is None:
+        return None
+    name = data.get("name")
+    if not isinstance(name, str):
+        return None
+    return UserRef(name=name, uri=str(data.get("uri", "")))
+
+
+def _playlist_images(union: Mapping[str, Any]) -> tuple[Image, ...]:
+    images = _optional_mapping(union, "images")
+    if images is None:
+        return ()
+    items = _items(images)
+    if not items:
+        return ()
+    sources = items[0].get("sources")
+    if not isinstance(sources, Sequence):
+        return ()
+    return tuple(
+        Image(url=str(s["url"]), width=s.get("width"), height=s.get("height"))
+        for s in sources
+        if isinstance(s, Mapping) and "url" in s
+    )
+
+
+def _preview_playback(union: Mapping[str, Any]) -> str | None:
+    playback = _optional_mapping(union, "previewPlayback")
+    if playback is None:
+        return None
+    preview = _optional_mapping(playback, "audioPreview")
+    if preview is None:
+        return None
+    for key in ("url", "cdnUrl"):
+        url = preview.get(key)
+        if isinstance(url, str) and url:
+            return url
+    return None
+
+
+def _show_ref(node: Any) -> ShowRef | None:
+    if not isinstance(node, Mapping):
+        return None
+    data = _optional_mapping(node, "data")
+    if data is None:
+        return None
+    uri = data.get("uri")
+    name = data.get("name")
+    if not isinstance(uri, str) or not uri or not isinstance(name, str):
+        return None
+    return ShowRef(
+        id=_id_from_uri(uri),
+        uri=uri,
+        name=name,
+        publisher=_publisher_name(data.get("publisher")),
+        images=_cover_art_images(data),
+    )
+
+
+def _publisher_name(node: Any) -> str | None:
+    if not isinstance(node, Mapping):
+        return None
+    name = node.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _topic_titles(node: Any) -> tuple[str, ...]:
+    if not isinstance(node, Mapping):
+        return ()
+    titles: list[str] = []
+    for item in _items(node):
+        title = item.get("title")
+        if isinstance(title, str) and title:
+            titles.append(title)
+    return tuple(titles)
+
+
+def _average_rating(node: Any) -> float | None:
+    if not isinstance(node, Mapping):
+        return None
+    average = node.get("averageRating")
+    if isinstance(average, (int, float)) and not isinstance(average, bool):
+        return float(average)
+    if isinstance(average, Mapping):
+        value = average.get("average")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _show_episodes(node: Mapping[str, Any] | None) -> tuple[Episode, ...]:
+    if node is None:
+        return ()
+    episodes: list[Episode] = []
+    for item in _items(node):
+        entity = _optional_mapping(item, "entity")
+        if entity is None:
+            continue
+        data = _optional_mapping(entity, "data")
+        if data is None:
+            continue
+        episode = _sparse_episode(data)
+        if episode is not None:
+            episodes.append(episode)
+    return tuple(episodes)
+
+
+def _sparse_episode(data: Mapping[str, Any]) -> Episode | None:
+    uri = data.get("uri")
+    if not isinstance(uri, str) or not uri:
+        return None
+    name = data.get("name")
+    duration = _optional_mapping(data, "duration") or {}
+    playability = _optional_mapping(data, "playability") or {}
+    return Episode(
+        id=_optional_str(data, "id") or _id_from_uri(uri),
+        uri=uri,
+        name=name if isinstance(name, str) else "",
+        duration_ms=_optional_int(duration, "totalMilliseconds") or 0,
+        description=_optional_str(data, "description") or "",
+        explicit=_gql_explicit(data),
+        playable=bool(playability.get("playable", False)),
+        release_date=_iso_date(data.get("releaseDate")),
+        images=_cover_art_images(data),
+        show=None,
+    )
+
+
+def _related_entity_images(entity: Mapping[str, Any]) -> tuple[Image, ...]:
+    images = entity.get("relatedEntityCoverArt")
+    if not isinstance(images, Sequence):
+        return ()
+    return tuple(
+        Image(url=str(i["url"]), width=i.get("maxWidth"), height=i.get("maxHeight"))
+        for i in images
+        if isinstance(i, Mapping) and "url" in i
+    )
+
+
+def _embed_explicit(entity: Mapping[str, Any]) -> bool:
+    if bool(entity.get("isExplicit", False)):
+        return True
+    ratings = entity.get("contentRatings")
+    if isinstance(ratings, Mapping):
+        labels = ratings.get("labels")
+        if isinstance(labels, Sequence):
+            return any(isinstance(label, str) and label.upper() == "EXPLICIT" for label in labels)
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# Colors & Canvas
+# --------------------------------------------------------------------------- #
+
+
+def parse_colors(extracted: Any) -> Colors:
+    """Build a :class:`Colors` from a ``fetchExtractedColors`` response.
+
+    Args:
+        extracted: The ``body["data"]["extractedColors"]`` list; the first
+            entry is used (one image was requested).
+
+    Returns:
+        A :class:`Colors` with ``#RRGGBB`` hex values.
+
+    Raises:
+        ParsingError: If the list is empty or a color's ``hex`` is missing.
+    """
+    if not isinstance(extracted, Sequence) or not extracted:
+        raise ParsingError(f"Color payload had no 'extractedColors'. {_UPDATE_HINT}")
+    entry = extracted[0]
+    if not isinstance(entry, Mapping):
+        raise ParsingError(f"Color payload entry was not an object. {_UPDATE_HINT}")
+    return Colors(
+        raw=_hex_color(entry.get("colorRaw")),
+        dark=_hex_color(entry.get("colorDark")),
+        light=_hex_color(entry.get("colorLight")),
+        is_fallback=_color_is_fallback(entry.get("colorRaw")),
+    )
+
+
+def _hex_color(node: Any) -> str:
+    if isinstance(node, Mapping):
+        value = node.get("hex")
+        if isinstance(value, str) and value:
+            return value
+    raise ParsingError(f"Color payload missing a 'hex' value. {_UPDATE_HINT}")
+
+
+def _color_is_fallback(node: Any) -> bool:
+    return bool(node.get("isFallback")) if isinstance(node, Mapping) else False
+
+
+def parse_canvas(node: Any) -> Canvas | None:
+    """Build a :class:`Canvas` from a ``trackUnion.canvas`` node.
+
+    Args:
+        node: The ``canvas`` value of a ``canvas``-op ``trackUnion``; ``None``
+            (the common case — most tracks have no Canvas) yields ``None``.
+
+    Returns:
+        The track's :class:`Canvas`, or ``None`` when absent.
+    """
+    if not isinstance(node, Mapping):
+        return None
+    url = node.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    uri = _optional_str(node, "uri") or ""
+    return Canvas(
+        id=_id_from_uri(uri) if uri else "",
+        uri=uri,
+        url=url,
+        canvas_type=_optional_str(node, "type"),
+        file_id=_optional_str(node, "fileId"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Discovery: related artists, discography, recommendations, user profile
+# --------------------------------------------------------------------------- #
+
+
+def parse_related_artists(union: Mapping[str, Any]) -> tuple[Artist, ...]:
+    """Build related artists from a ``queryArtistRelated`` ``artistUnion``.
+
+    Args:
+        union: The ``body["data"]["artistUnion"]`` object.
+
+    Returns:
+        The related artists (id / uri / name / images); empty when absent.
+    """
+    related = _optional_mapping(union, "relatedContent")
+    if related is None:
+        return ()
+    node = _optional_mapping(related, "relatedArtists")
+    if node is None:
+        return ()
+    artists: list[Artist] = []
+    for item in _items(node):
+        uri = _optional_str(item, "uri")
+        profile = _optional_mapping(item, "profile") or {}
+        name = _optional_str(profile, "name")
+        if not uri or not name:
+            continue
+        artists.append(
+            Artist(
+                id=_optional_str(item, "id") or _id_from_uri(uri),
+                uri=uri,
+                name=name,
+                images=_avatar_images(item),
+            )
+        )
+    return tuple(artists)
+
+
+def _discography_all(union: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    discography = _optional_mapping(union, "discography")
+    if discography is None:
+        return None
+    return _optional_mapping(discography, "all")
+
+
+def parse_discography_releases(union: Mapping[str, Any]) -> tuple[AlbumRef, ...]:
+    """Extract one page of releases from a ``queryArtistDiscographyAll`` union.
+
+    The discography nests releases at ``discography.all.items[].releases.items[]``;
+    every release (album, single, compilation) is flattened into an
+    :class:`AlbumRef` in page order.
+
+    Args:
+        union: The ``body["data"]["artistUnion"]`` object of a discography page.
+
+    Returns:
+        The page's releases as :class:`AlbumRef` objects.
+    """
+    node = _discography_all(union)
+    if node is None:
+        return ()
+    releases: list[AlbumRef] = []
+    for item in _items(node):
+        group = _optional_mapping(item, "releases")
+        if group is None:
+            continue
+        for release in _items(group):
+            uri = _optional_str(release, "uri")
+            name = _optional_str(release, "name")
+            if not uri or not name:
+                continue
+            releases.append(
+                AlbumRef(
+                    id=_optional_str(release, "id") or _id_from_uri(uri),
+                    uri=uri,
+                    name=name,
+                    images=_cover_art_images(release),
+                )
+            )
+    return tuple(releases)
+
+
+def discography_total(union: Mapping[str, Any]) -> int | None:
+    """Return the artist's full release count from a discography page."""
+    node = _discography_all(union)
+    return _total_count(node) if node is not None else None
+
+
+def discography_item_count(union: Mapping[str, Any]) -> int:
+    """Return the number of raw release-groups on a discography page (for paging)."""
+    node = _discography_all(union)
+    return len(_items(node)) if node is not None else 0
+
+
+def parse_similar_albums(node: Mapping[str, Any]) -> tuple[AlbumRef, ...]:
+    """Build recommended albums from a ``similarAlbumsBasedOnThisTrack`` node.
+
+    Args:
+        node: The ``body["data"]["seoRecommendedTrackAlbum"]`` object.
+
+    Returns:
+        The recommended albums as :class:`AlbumRef` objects (empty when none).
+    """
+    albums: list[AlbumRef] = []
+    for item in _items(node):
+        data = _optional_mapping(item, "data")
+        if data is None:
+            continue
+        uri = _optional_str(data, "uri")
+        name = _optional_str(data, "name")
+        if not uri or not name:
+            continue
+        albums.append(
+            AlbumRef(
+                id=_optional_str(data, "id") or _id_from_uri(uri),
+                uri=uri,
+                name=name,
+                images=_cover_art_images(data),
+            )
+        )
+    return tuple(albums)
+
+
+def parse_user_profile(payload: Mapping[str, Any]) -> UserProfile:
+    """Build a :class:`UserProfile` from a ``user-profile-view`` body.
+
+    Args:
+        payload: The decoded profile body (flat JSON with ``uri``, ``name``,
+            ``followers_count``, ``public_playlists``, …).
+
+    Returns:
+        A :class:`UserProfile` mirroring the public profile.
+
+    Raises:
+        ParsingError: If the body has no ``uri``.
+    """
+    uri = _require_str(payload, "uri", "uri")
+    image = _optional_str(payload, "image_url")
+    return UserProfile(
+        id=_id_from_uri(uri),
+        uri=uri,
+        name=_optional_str(payload, "name") or "",
+        images=(Image(url=image),) if image else (),
+        followers_count=_optional_int(payload, "followers_count"),
+        following_count=_optional_int(payload, "following_count"),
+        public_playlists=_profile_playlists(payload.get("public_playlists")),
+        public_playlists_total=_optional_int(payload, "total_public_playlists_count"),
+        recently_played_artists=_profile_artists(payload.get("recently_played_artists")),
+        is_verified=_optional_bool(payload, "is_verified"),
+    )
+
+
+def _profile_playlists(node: Any) -> tuple[Playlist, ...]:
+    if not isinstance(node, Sequence):
+        return ()
+    playlists: list[Playlist] = []
+    for item in node:
+        if not isinstance(item, Mapping):
+            continue
+        uri = _optional_str(item, "uri")
+        name = _optional_str(item, "name")
+        if not uri or not name:
+            continue
+        image = _optional_str(item, "image_url")
+        owner_name = _optional_str(item, "owner_name")
+        owner = (
+            UserRef(name=owner_name, uri=_optional_str(item, "owner_uri") or "")
+            if owner_name
+            else None
+        )
+        playlists.append(
+            Playlist(
+                id=_id_from_uri(uri),
+                uri=uri,
+                name=name,
+                description="",
+                owner=owner,
+                followers=_optional_int(item, "followers_count"),
+                images=(Image(url=image),) if image else (),
+            )
+        )
+    return tuple(playlists)
+
+
+def _profile_artists(node: Any) -> tuple[ArtistRef, ...]:
+    if not isinstance(node, Sequence):
+        return ()
+    artists: list[ArtistRef] = []
+    for item in node:
+        if not isinstance(item, Mapping):
+            continue
+        uri = _optional_str(item, "uri")
+        name = _optional_str(item, "name")
+        if not uri or not name:
+            continue
+        artists.append(ArtistRef(name=name, uri=uri, id=_id_from_uri(uri)))
+    return tuple(artists)
+
+
+# --------------------------------------------------------------------------- #
+# Credits & concerts
+# --------------------------------------------------------------------------- #
+
+
+def parse_credits(payload: Mapping[str, Any]) -> Credits:
+    """Build :class:`Credits` from a ``track-credits-view`` body.
+
+    Args:
+        payload: The decoded credits body (``trackUri``, ``trackTitle``,
+            ``roleCredits``, …).
+
+    Returns:
+        A :class:`Credits` grouping people by role.
+
+    Raises:
+        ParsingError: If the body has no ``trackUri``.
+    """
+    track_uri = _require_str(payload, "trackUri", "trackUri")
+    roles: list[CreditRole] = []
+    raw_roles = payload.get("roleCredits")
+    if isinstance(raw_roles, Sequence) and not isinstance(raw_roles, str):
+        for role in raw_roles:
+            if not isinstance(role, Mapping):
+                continue
+            title = _optional_str(role, "roleTitle")
+            if not title:
+                continue
+            roles.append(CreditRole(title=title, artists=_credit_artists(role.get("artists"))))
+    return Credits(
+        track_uri=track_uri,
+        track_title=_optional_str(payload, "trackTitle") or "",
+        roles=tuple(roles),
+        source_names=_str_tuple(payload.get("sourceNames")),
+    )
+
+
+def _credit_artists(node: Any) -> tuple[CreditArtist, ...]:
+    if not isinstance(node, Sequence) or isinstance(node, str):
+        return ()
+    artists: list[CreditArtist] = []
+    for item in node:
+        if not isinstance(item, Mapping):
+            continue
+        name = _optional_str(item, "name")
+        if not name:
+            continue
+        artists.append(
+            CreditArtist(
+                name=name,
+                uri=_optional_str(item, "uri") or "",
+                image_url=_optional_str(item, "imageUri"),
+                subroles=_str_tuple(item.get("subroles")),
+            )
+        )
+    return tuple(artists)
+
+
+def parse_concerts(node: Mapping[str, Any]) -> tuple[Concert, ...]:
+    """Build concerts from an ``ArtistConcerts`` ``concerts`` node.
+
+    Args:
+        node: The ``body["data"]["concerts"]`` object (which nests the listing
+            at ``concerts.items[].data``).
+
+    Returns:
+        The artist's upcoming concerts (empty when there are none).
+    """
+    inner = _optional_mapping(node, "concerts")
+    if inner is None:
+        return ()
+    concerts: list[Concert] = []
+    for item in _items(inner):
+        data = _optional_mapping(item, "data")
+        if data is None:
+            continue
+        uri = _optional_str(data, "uri")
+        title = _optional_str(data, "title")
+        if not uri or not title:
+            continue
+        location = _optional_mapping(data, "location") or {}
+        concerts.append(
+            Concert(
+                id=_id_from_uri(uri),
+                uri=uri,
+                title=title,
+                start_date=_optional_str(data, "startDateIsoString"),
+                city=_optional_str(location, "city"),
+                artists=_concert_artists(data.get("artists")),
+            )
+        )
+    return tuple(concerts)
+
+
+def _concert_artists(node: Any) -> tuple[ArtistRef, ...]:
+    if not isinstance(node, Mapping):
+        return ()
+    artists: list[ArtistRef] = []
+    for item in _items(node):
+        data = _optional_mapping(item, "data") or {}
+        profile = _optional_mapping(data, "profile") or {}
+        name = _optional_str(profile, "name")
+        if not name:
+            continue
+        artists.append(ArtistRef(name=name, uri=_optional_str(data, "uri") or ""))
+    return tuple(artists)
+
+
+def _str_tuple(node: Any) -> tuple[str, ...]:
+    if not isinstance(node, Sequence) or isinstance(node, str):
+        return ()
+    return tuple(item for item in node if isinstance(item, str) and item)

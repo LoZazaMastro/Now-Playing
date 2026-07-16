@@ -1,0 +1,81 @@
+This project was bootstrapped from the Decky Plugin Template and uses the
+standard Decky plugin build/runtime scaffolding.
+
+    Decky Plugin Template
+    Copyright (c) 2022-2024, Steam Deck Homebrew
+    Licensed under the BSD 3-Clause License.
+    https://github.com/SteamDeckHomebrew/decky-plugin-template
+
+All original code in this repository is distributed under the terms stated in
+the accompanying LICENSE file. The attribution above is retained to satisfy the
+BSD 3-Clause notice requirement of the template it is based on.
+
+Vendored Python dependencies used for direct Windows Core Audio access:
+
+- pycaw 20251023 — MIT License
+- comtypes 1.4.16 — MIT License
+- psutil 7.2.2 — BSD 3-Clause License
+- TinyTag 2.1.2 — MIT License
+
+Their original license texts are retained inside the vendor/*dist-info/licenses
+or vendor/*dist-info directories distributed with the plugin.
+
+Local playback architecture reference
+-------------------------------------
+The local player implementation was independently adapted after studying Nora,
+an open-source desktop music player that uses an HTMLAudioElement-based playback
+engine.
+
+Nora is licensed under the MIT License:
+Copyright (c) 2023 Sandakan Nipunajith
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Direct Windows media-session fallback
+-------------------------------------
+The plugin vendors Python/WinRT 3.2.1 components used to access Windows Global
+System Media Transport Controls from the Decky Python runtime when the bundled
+MediaBridge helper cannot see the interactive user's media sessions.
+
+Python/WinRT is distributed under the MIT License.
+Repository: https://github.com/pywinrt/pywinrt
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Integrated Spotify playback
+---------------------------
+The bundled Spotify playback helper uses librespot 0.8.0, distributed under
+the MIT License. Copyright (c) 2015 Paul Lietar and the librespot contributors.
+The complete license text is retained in licenses/librespot-LICENSE.txt.

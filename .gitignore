@@ -1,0 +1,22 @@
+# --- Dipendenze ---
+node_modules/
+
+# --- Output di build / pacchetti ---
+release/
+__pycache__/
+*.pyc
+
+# --- Binari compilati dei bridge (ricostruibili dai sorgenti, distribuiti nello zip installer) ---
+*.exe
+*.pdb
+bin/
+AppVolumeBridge/bin/
+AppVolumeBridge/obj/
+AppVolumeBridge/publish/
+ThumbnailBridge/bin/
+ThumbnailBridge/obj/
+SpotifyPlaybackBridge/target/
+
+# --- Varie ---
+*.log
+.DS_Store

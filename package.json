@@ -1,0 +1,30 @@
+{
+  "name": "now-playing",
+  "version": "2.0.0",
+  "description": "Console-style Windows music controls, fullscreen visuals, optional Spotify browsing and a built-in local music library/player for Decky Loader.",
+  "author": "LoZazaMastro",
+  "type": "module",
+  "scripts": {
+    "build": "npm run check:i18n && npm run check:types && rollup -c",
+    "watch": "rollup -c -w",
+    "package:win": "powershell -ExecutionPolicy Bypass -File ./package-win.ps1",
+    "check:i18n": "node scripts/validate-translations.mjs",
+    "check:types": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
+    "check:python": "python -m py_compile main.py && python scripts/validate-runtime.py",
+    "verify": "npm run check:i18n && npm run check:types && npm run check:python && node --check dist/index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@decky/api": "^1.1.3",
+    "@decky/ui": "^4.11.0",
+    "react-icons": "^5.3.0",
+    "tslib": "^2.7.0"
+  },
+  "devDependencies": {
+    "@decky/rollup": "^1.0.2",
+    "@types/react": "19.1.1",
+    "@types/react-dom": "19.1.1",
+    "rollup": "^4.53.3",
+    "typescript": "^5.6.2"
+  }
+}
