@@ -13,7 +13,7 @@ import { localAudioPlayer } from "./localAudio";
 import { formatTranslation, getTranslations, localizeRuntimeMessage } from "./i18n";
 import type { CoreTranslation, SpotifyTranslation } from "./i18n";
 import { getSavedSourceVolume, saveSourceVolume, SOURCE_VOLUME_CHANGED_EVENT } from "./sourceVolume";
-import { SmoothProgressFill } from "./smoothProgress";
+import { SmoothProgressFill, SmoothProgressTime } from "./smoothProgress";
 
 const emptySnapshot: Snapshot = {
   selectedPlayer: "",
@@ -21,6 +21,33 @@ const emptySnapshot: Snapshot = {
   selected: null,
   players: [],
 };
+
+function playerSnapshotNeedsRender(
+  previous: PlayerSnapshot | null,
+  next: PlayerSnapshot | null,
+  previousSampleAt: number,
+  nextSampleAt: number,
+) {
+  if (!previous || !next) return previous !== next;
+  const stableFields: (keyof PlayerSnapshot)[] = [
+    "id", "name", "title", "artist", "album", "status", "length",
+    "canNext", "canPrevious", "canPlay", "canPause", "canTogglePlayPause",
+    "canShuffle", "canRepeat", "shuffleActive", "repeatMode", "artworkUrl",
+  ];
+  if (stableFields.some((key) => previous[key] !== next[key])) return true;
+
+  const elapsed = previous.status === "Playing" ? Math.max(0, nextSampleAt - previousSampleAt) : 0;
+  const projected = Math.min(Number(previous.length || Number.MAX_SAFE_INTEGER), Number(previous.position || 0) + elapsed);
+  const tolerance = previous.status === "Playing" ? 1600 : 300;
+  return Math.abs(Number(next.position || 0) - projected) > tolerance;
+}
+
+function snapshotNeedsRender(previous: Snapshot, next: Snapshot, previousSampleAt: number, nextSampleAt: number) {
+  if (previous.selectedPlayer !== next.selectedPlayer || previous.currentPlayer !== next.currentPlayer) return true;
+  const previousPlayer = previous.selected ?? previous.players?.[0] ?? null;
+  const nextPlayer = next.selected ?? next.players?.[0] ?? null;
+  return playerSnapshotNeedsRender(previousPlayer, nextPlayer, previousSampleAt, nextSampleAt);
+}
 
 const CONTROL_GAP = 8;
 const BUTTON_HEIGHT = 28;
@@ -476,12 +503,10 @@ function CoverBox(props: { artUrl?: string; onActivate?: () => void; ariaLabel?:
     </DialogButton>
   );
 }
-function ProgressView(props: { current: PlayerSnapshot | null; clock: number; snapshotAt: number }) {
-  const { current, clock, snapshotAt } = props;
+function ProgressView(props: { current: PlayerSnapshot | null; snapshotAt: number }) {
+  const { current, snapshotAt } = props;
   const length = Math.max(1, current?.length ?? 1);
   const basePosition = current?.position ?? 0;
-  const livePosition = current?.status === "Playing" ? basePosition + Math.max(0, clock - snapshotAt) : basePosition;
-  const position = clamp(livePosition, 0, length);
 
   return (
     <div style={{ ...meterBoxStyle, marginTop: "12px" }}>
@@ -495,7 +520,7 @@ function ProgressView(props: { current: PlayerSnapshot | null; clock: number; sn
         />
       </div>
       <div style={subtleRowTextStyle}>
-        <span>{formatTime(position)}</span>
+        <SmoothProgressTime position={basePosition} duration={length} playing={current?.status === "Playing"} sampledAt={snapshotAt} format={formatTime} />
         <span>{formatTime(length)}</span>
       </div>
     </div>
@@ -506,7 +531,7 @@ let fullscreenChromeObservers: MutationObserver[] = [];
 let fullscreenChromeFrame = 0;
 let fullscreenSuppressionLeaseCount = 0;
 let fullscreenSuppressionReleaseTimer = 0;
-let fullscreenChromeRapidTimer = 0;
+const fullscreenChromeRefreshTimers = new Set<number>();
 const fullscreenTransitionLeaseTimers = new Set<number>();
 
 const fullscreenChromeSelectors = [
@@ -670,6 +695,18 @@ function scheduleFullscreenChromeMark() {
   });
 }
 
+function scheduleFullscreenChromeBurst() {
+  fullscreenChromeRefreshTimers.forEach((timer) => window.clearTimeout(timer));
+  fullscreenChromeRefreshTimers.clear();
+  [50, 140, 320, 650, 1100].forEach((delay) => {
+    const timer = window.setTimeout(() => {
+      fullscreenChromeRefreshTimers.delete(timer);
+      markAllFullscreenChrome();
+    }, delay);
+    fullscreenChromeRefreshTimers.add(timer);
+  });
+}
+
 function activateFullscreenChromeSuppression() {
   if (typeof document === "undefined") return;
   markAllFullscreenChrome();
@@ -679,18 +716,16 @@ function activateFullscreenChromeSuppression() {
   fullscreenSuppressionDocuments().forEach((targetDocument) => {
     if (!targetDocument.body) return;
     const observer = new MutationObserver(scheduleFullscreenChromeMark);
-    observer.observe(targetDocument.body, { childList: true, subtree: true, attributes: true });
+    observer.observe(targetDocument.body, { childList: true, subtree: true });
     fullscreenChromeObservers.push(observer);
   });
-
-  if (fullscreenChromeRapidTimer) window.clearInterval(fullscreenChromeRapidTimer);
-  fullscreenChromeRapidTimer = window.setInterval(markAllFullscreenChrome, 16);
+  scheduleFullscreenChromeBurst();
 }
 
 function deactivateFullscreenChromeSuppression() {
   if (typeof document === "undefined") return;
-  if (fullscreenChromeRapidTimer) window.clearInterval(fullscreenChromeRapidTimer);
-  fullscreenChromeRapidTimer = 0;
+  fullscreenChromeRefreshTimers.forEach((timer) => window.clearTimeout(timer));
+  fullscreenChromeRefreshTimers.clear();
   fullscreenChromeObservers.forEach((observer) => observer.disconnect());
   fullscreenChromeObservers = [];
   if (fullscreenChromeFrame) window.cancelAnimationFrame(fullscreenChromeFrame);
@@ -1707,7 +1742,7 @@ function FullscreenSettingsRoute() {
         </DialogButton>
         <div style={{ marginBottom: "26px" }}>
           <h1 style={{ margin: 0, fontSize: "42px", letterSpacing: "-.035em" }}>{settingsLabel}</h1>
-          <div style={{ marginTop: 4, opacity: .52 }}>Now Playing 2.0.0</div>
+          <div style={{ marginTop: 4, opacity: .52 }}>Now Playing 2.1.0</div>
         </div>
 
         <Focusable className="npSettingsGrid" flow-children="grid">
@@ -2142,11 +2177,11 @@ function Content() {
   const [spotifyAlbumRequest, setSpotifyAlbumRequest] = useState<{ id: string; title: string; nonce: number } | null>(null);
   const [localAlbumRequest, setLocalAlbumRequest] = useState<{ id: string; title: string; nonce: number } | null>(null);
   const [enabledAppKeys, setEnabledAppKeys] = useState<MusicAppKey[]>(loadEnabledAppKeys);
+  const [activeServiceReady, setActiveServiceReady] = useState(false);
   const [coverSource, setCoverSource] = useState<CoverSource>("online");
   const [fullscreenEffect, setFullscreenEffect] = useState<FullscreenEffectKey>(loadFullscreenEffect);
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [snapshotAt, setSnapshotAt] = useState<number>(Date.now());
-  const [clock, setClock] = useState<number>(Date.now());
   const [loading, setLoading] = useState<boolean>(true);
   const [busy, setBusy] = useState<boolean>(false);
   const [coverUrl, setCoverUrl] = useState<string>("");
@@ -2156,7 +2191,6 @@ function Content() {
   const [activeAppRunning, setActiveAppRunning] = useState<boolean>(false);
   const [mediaVisible, setMediaVisible] = useState<boolean>(true);
   const [bottomGlowFadeTop, setBottomGlowFadeTop] = useState<number>(520);
-  const [viewEpoch, setViewEpoch] = useState<number>(0);
   const qamRootRef = useRef<HTMLDivElement>(null);
   const volumeWrapperRef = useRef<HTMLDivElement>(null);
   const refreshingRef = useRef<boolean>(false);
@@ -2166,14 +2200,26 @@ function Content() {
   const volumeInteractionAtRef = useRef<number>(0);
   const volumeCommitInFlightRef = useRef<boolean>(false);
   const volumeCommitQueuedRef = useRef<boolean>(false);
+  const volumeCommitRetryRef = useRef<number>(0);
   const coverRequestRef = useRef<number>(0);
   const coverClearTimerRef = useRef<number>(0);
   const coverCacheRef = useRef<Map<string, string>>(new Map());
+  const coverUrlRef = useRef<string>("");
+  const coverIdentityRef = useRef<string>("");
+  const volumeObservedRef = useRef<{ value: number; count: number }>({ value: -1, count: 0 });
   const spotifyPlaybackCacheRef = useRef<{ at: number; player: PlayerSnapshot | null; lastValidAt: number }>({ at: 0, player: null, lastValidAt: 0 });
   const spotifyApiPausedRef = useRef(false);
   const sourceRefreshTimersRef = useRef<number[]>([]);
   const volumeApplyTimersRef = useRef<number[]>([]);
   const volumeAppliedRef = useRef(false);
+  const stableCurrentRef = useRef<{ service: string; at: number; player: PlayerSnapshot } | null>(null);
+  const sourceInteractionAtRef = useRef(0);
+  const snapshotRef = useRef<Snapshot>(emptySnapshot);
+  const snapshotAtRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
 
   useEffect(() => {
     const syncSource = (event?: Event) => {
@@ -2190,6 +2236,36 @@ function Content() {
   }, []);
 
   const activeServiceKey = enabledAppKeys[0] ?? "localMusic";
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = 0;
+    const syncBackendSource = async () => {
+      try {
+        const service = await python.getActiveService();
+        if (cancelled || !musicApps.some((app) => app.key === service)) return;
+        if (Date.now() - sourceInteractionAtRef.current < 3000) return;
+        const next = service as MusicAppKey;
+        setEnabledAppKeys((previous) => {
+          if (previous[0] === next) return previous;
+          saveEnabledAppKeys([next]);
+          return [next];
+        });
+      } catch {
+        // The saved frontend choice remains usable if the backend is reloading.
+      } finally {
+        if (!cancelled) {
+          setActiveServiceReady(true);
+          timer = window.setTimeout(() => void syncBackendSource(), 1800);
+        }
+      }
+    };
+    void syncBackendSource();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (activeServiceKey === "localMusic") {
@@ -2213,16 +2289,51 @@ function Content() {
     };
   }, [activeServiceKey]);
 
-  const current: PlayerSnapshot | null = useMemo(
+  const rawCurrent: PlayerSnapshot | null = useMemo(
     () => snapshot.selected ?? snapshot.players?.[0] ?? null,
     [snapshot]
   );
+  const current: PlayerSnapshot | null = useMemo(() => {
+    const now = Date.now();
+    const previous = stableCurrentRef.current;
+    const hasIdentity = Boolean(rawCurrent?.title?.trim());
+    if (rawCurrent && hasIdentity) {
+      const sameTrack = previous?.service === activeServiceKey
+        && previous.player.id === rawCurrent.id
+        && previous.player.title === rawCurrent.title
+        && previous.player.artist === rawCurrent.artist;
+      const player = sameTrack
+        ? {
+            ...previous.player,
+            ...rawCurrent,
+            artworkUrl: rawCurrent.artworkUrl || previous.player.artworkUrl,
+            album: rawCurrent.album || previous.player.album,
+          }
+        : rawCurrent;
+      stableCurrentRef.current = { service: activeServiceKey, at: now, player };
+      return player;
+    }
+    if (previous?.service === activeServiceKey && now - previous.at < 4200) {
+      return rawCurrent
+        ? {
+            ...previous.player,
+            ...rawCurrent,
+            title: previous.player.title,
+            artist: previous.player.artist,
+            album: previous.player.album,
+            artworkUrl: previous.player.artworkUrl,
+          }
+        : previous.player;
+    }
+    return rawCurrent;
+  }, [rawCurrent, activeServiceKey]);
   const enabledApps = useMemo(
     () => musicApps.filter((app) => app.key === activeServiceKey),
     [activeServiceKey]
   );
 
   useEffect(() => {
+    if (!activeServiceReady) return;
     let cancelled = false;
     sourceRefreshTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     sourceRefreshTimersRef.current = [];
@@ -2232,12 +2343,12 @@ function Content() {
     volumeApplyTimersRef.current = [];
     coverRequestRef.current += 1;
     spotifyPlaybackCacheRef.current = { at: 0, player: null, lastValidAt: 0 };
+    stableCurrentRef.current = null;
     mediaKeyRef.current = "";
     setSnapshot(emptySnapshot);
     setCoverResolving(false);
     setMediaVisible(false);
     setLoading(true);
-    setViewEpoch((value) => value + 1);
 
     // Enforce one playback source even when the setting changed from the
     // fullscreen route or while QAM was unmounted. The backend serializes app
@@ -2272,7 +2383,7 @@ function Content() {
       sourceRefreshTimersRef.current.forEach((timer) => window.clearTimeout(timer));
       sourceRefreshTimersRef.current = [];
     };
-  }, [activeServiceKey]);
+  }, [activeServiceKey, activeServiceReady]);
 
   const mediaKey = `${current?.id ?? ""}|${current?.title ?? ""}|${current?.artist ?? ""}|${current?.album ?? ""}`;
   const spotifyApiActive = activeServiceKey === "spotify" && spotifySettingsReady && spotifyPlus.enabled && spotifyPlus.authenticated;
@@ -2329,8 +2440,14 @@ function Content() {
           shuffleActive: local.shuffleActive,
           repeatMode: local.repeatMode === "All" ? "List" : local.repeatMode === "One" ? "Track" : "Off",
         } : null;
-        setSnapshot({ selectedPlayer: player?.id ?? "", currentPlayer: player?.id ?? "", selected: player, players: player ? [player] : [] });
-        setSnapshotAt(Date.now());
+        const nextSnapshot: Snapshot = { selectedPlayer: player?.id ?? "", currentPlayer: player?.id ?? "", selected: player, players: player ? [player] : [] };
+        const sampledAt = Date.now();
+        if (snapshotNeedsRender(snapshotRef.current, nextSnapshot, snapshotAtRef.current, sampledAt)) {
+          snapshotRef.current = nextSnapshot;
+          snapshotAtRef.current = sampledAt;
+          setSnapshot(nextSnapshot);
+          setSnapshotAt(sampledAt);
+        }
       } else if (spotifyApiActive) {
         if (spotifyApiPausedRef.current) {
           const paused = spotifyPausedPlayer(spotifyT);
@@ -2367,8 +2484,14 @@ function Content() {
           // never overwrite Spotify API metadata in API mode.
         }
       } else {
-        setSnapshot(await python.getSnapshot());
-        setSnapshotAt(Date.now());
+        const nextSnapshot = await python.getSnapshot();
+        const sampledAt = Date.now();
+        if (snapshotNeedsRender(snapshotRef.current, nextSnapshot, snapshotAtRef.current, sampledAt)) {
+          snapshotRef.current = nextSnapshot;
+          snapshotAtRef.current = sampledAt;
+          setSnapshot(nextSnapshot);
+          setSnapshotAt(sampledAt);
+        }
       }
     } catch (error) {
       console.warn(t.refreshFailed, error);
@@ -2414,13 +2537,17 @@ function Content() {
     return isLocalMusicActive ? localAudioPlayer.command("repeat") : isSpotifyApiActive ? python.spotifyPlayerCommand("repeat") : python.repeat();
   }
 
-  async function runAction(action: () => Promise<unknown>, optimistic?: () => void) {
+  async function runAction(
+    action: () => Promise<unknown>,
+    optimistic?: () => void,
+    spotifyRefreshDelays: number[] = [260, 900, 1800]
+  ) {
     const blockUi = !isSpotifyApiActive;
     if (blockUi) setBusy(true);
     optimistic?.();
 
     const pending = action();
-    const delays = isSpotifyApiActive ? [180, 520, 1100, 2200] : [45, 130, 320, 720, 1450];
+    const delays = isSpotifyApiActive ? spotifyRefreshDelays : [45, 130, 320, 720, 1450];
     delays.forEach((delay) => {
       window.setTimeout(() => void refresh(true), delay);
     });
@@ -2451,6 +2578,7 @@ function Content() {
   }
 
   function toggleEnabledApp(key: MusicAppKey) {
+    sourceInteractionAtRef.current = Date.now();
     if (key === "localMusic") {
       void python.pauseExternalPlayback().catch(() => false);
     } else {
@@ -2551,7 +2679,13 @@ function Content() {
         if (cancelled) return;
         const wasPaused = spotifyApiPausedRef.current;
         spotifyApiPausedRef.current = Boolean(status.active);
-        setSpotifyApiStatus(status);
+        setSpotifyApiStatus((previous) => (
+          previous.active === status.active
+          && previous.remainingSeconds === status.remainingSeconds
+          && previous.until === status.until
+            ? previous
+            : status
+        ));
         if (status.active && !wasPaused) {
           const paused = spotifyPausedPlayer(spotifyT);
           spotifyPlaybackCacheRef.current = { at: Date.now(), player: null, lastValidAt: 0 };
@@ -2586,52 +2720,58 @@ function Content() {
     const saved = getSavedSourceVolume(sourceVolumeStorageKey(activeServiceKey), fallback);
     volumeValueRef.current = saved;
     setAppVolume(saved);
-    setVolumeReady(true);
+    setVolumeReady(activeServiceKey === "localMusic");
 
-    const applySavedVolume = async () => {
+    const initializeVolume = async () => {
       if (cancelled) return;
       try {
         if (activeServiceKey === "localMusic") {
           await localAudioPlayer.initialize();
           if (cancelled) return;
-          localAudioPlayer.setVolume(saved);
+          localAudioPlayer.setVolume(volumeValueRef.current);
           volumeAppliedRef.current = true;
           setVolumeReady(true);
           return;
         }
-        if (spotifyApiActive) {
-          if (spotifyApiPausedRef.current) return;
-          const result = await python.setAppVolume(saved);
-          if (!cancelled && result?.ok) {
-            volumeAppliedRef.current = true;
-            setVolumeReady(true);
-          }
+        const startedAt = Date.now();
+        const result = await python.getAppVolume(activeServiceKey);
+        if (cancelled || volumeInteractionAtRef.current > startedAt) return;
+        if (result?.ok) {
+          const actual = clamp(result.volume, 0, 100);
+          volumeValueRef.current = actual;
+          setAppVolume(actual);
+          saveSourceVolume(sourceVolumeStorageKey(activeServiceKey), actual, "observed");
+          volumeAppliedRef.current = true;
+          setVolumeReady(true);
           return;
         }
-        const result = await python.setAppVolume(saved);
-        if (!cancelled && result?.ok) {
+      } catch {
+        // The player may still be creating its Windows audio session.
+      }
+
+      if (cancelled || (spotifyApiActive && spotifyApiPausedRef.current)) return;
+      try {
+        const applied = await python.setAppVolume(volumeValueRef.current, activeServiceKey);
+        if (!cancelled && applied?.ok && !applied.stale) {
           volumeAppliedRef.current = true;
           setVolumeReady(true);
         }
       } catch {
-        // The session may still be registering. Later attempts and the first
-        // complete player snapshot will retry without replacing the saved value.
+        if (!cancelled) setVolumeReady(false);
       }
     };
 
     const delays = activeServiceKey === "localMusic"
       ? [0]
-      : spotifyApiActive
-        ? [0, 450, 1200, 2600, 5200]
-        : [0, 350, 1000, 2200, 4000, 7000, 11000];
-    volumeApplyTimersRef.current = delays.map((delay) => window.setTimeout(() => void applySavedVolume(), delay));
+      : [0, 1400, 4200];
+    volumeApplyTimersRef.current = delays.map((delay) => window.setTimeout(() => void initializeVolume(), delay));
 
     return () => {
       cancelled = true;
       volumeApplyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
       volumeApplyTimersRef.current = [];
     };
-  }, [activeServiceKey, current?.id, current?.name, spotifyApiActive, spotifySettingsReady, spotifyPaused]);
+  }, [activeServiceKey, spotifyApiActive, spotifySettingsReady]);
 
   useEffect(() => {
     if (activeServiceKey !== "localMusic") return;
@@ -2645,6 +2785,7 @@ function Content() {
       const detail = event instanceof CustomEvent ? event.detail : null;
       if (!detail || String(detail.source || "") !== sourceVolumeStorageKey(activeServiceKey)) return;
       const next = clamp(Number(detail.volume), 0, 100);
+      if (detail.origin !== "observed") volumeInteractionAtRef.current = Date.now();
       volumeValueRef.current = next;
       setAppVolume(next);
       setVolumeReady(true);
@@ -2672,18 +2813,10 @@ function Content() {
 
     const timer = window.setInterval(() => {
       void refresh(false);
-    }, 500);
+    }, 900);
 
     return () => window.clearInterval(timer);
   }, [activeServiceKey]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setClock(Date.now());
-    }, 250);
-
-    return () => window.clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -2695,14 +2828,38 @@ function Content() {
       try {
         const result = isLocalMusicActive
           ? { ok: true, volume: localAudioPlayer.getSnapshot().volume }
-          : await python.getAppVolume();
+          : await python.getAppVolume(activeServiceKey);
         const userChangedVolumeWhileReading = volumeInteractionAtRef.current > startedAt;
         if (!cancelled && result?.ok && !userChangedVolumeWhileReading) {
           const next = clamp(result.volume, 0, 100);
+          const displayed = volumeValueRef.current;
+          const differs = Math.abs(next - displayed) > 2;
+          if (result.origin !== "spotify-connect" && differs && Date.now() - volumeInteractionAtRef.current < 15000) {
+            if (!volumeCommitInFlightRef.current && !volumeCommitTimerRef.current) {
+              volumeCommitRetryRef.current = 0;
+              volumeCommitTimerRef.current = window.setTimeout(() => {
+                volumeCommitTimerRef.current = 0;
+                flushAppVolumeCommit();
+              }, 80);
+            }
+            return;
+          }
+          if (differs) {
+            const observed = volumeObservedRef.current;
+            volumeObservedRef.current = observed.value === next
+              ? { value: next, count: observed.count + 1 }
+              : { value: next, count: 1 };
+            // A newly-created Windows/Connect session can briefly report 100.
+            // Accept an external change only after two matching observations;
+            // plugin-originated changes arrive immediately through the shared event.
+            if (volumeObservedRef.current.count < 2) return;
+          } else {
+            volumeObservedRef.current = { value: next, count: 0 };
+          }
           volumeValueRef.current = next;
           setAppVolume(next);
           setVolumeReady(true);
-          saveSourceVolume(sourceVolumeStorageKey(activeServiceKey), next);
+          saveSourceVolume(sourceVolumeStorageKey(activeServiceKey), next, "observed");
         }
       } catch {
         if (!cancelled && volumeInteractionAtRef.current <= startedAt) setVolumeReady(false);
@@ -2716,7 +2873,7 @@ function Content() {
       window.clearTimeout(initialTimer);
       window.clearInterval(timer);
     };
-  }, [activeServiceKey, current?.id, current?.name, isLocalMusicActive, isSpotifyApiActive]);
+  }, [activeServiceKey, isLocalMusicActive, isSpotifyApiActive]);
 
   function flushAppVolumeCommit() {
     if (volumeCommitInFlightRef.current) {
@@ -2730,7 +2887,7 @@ function Content() {
 
     const pendingVolume = isLocalMusicActive
       ? Promise.resolve({ ok: true, volume: localAudioPlayer.setVolume(requested).volume })
-      : python.setAppVolume(requested);
+      : python.setAppVolume(requested, activeServiceKey);
 
     void pendingVolume
       .then((result) => {
@@ -2738,6 +2895,7 @@ function Content() {
           setVolumeReady(false);
           return;
         }
+        if ("stale" in result && result.stale) return;
 
         volumeAppliedRef.current = true;
         setVolumeReady(true);
@@ -2745,8 +2903,17 @@ function Content() {
         // while AppVolumeBridge was applying the previous value.
         if (volumeValueRef.current === requested) {
           const confirmed = clamp(result.volume, 0, 100);
-          volumeValueRef.current = confirmed;
-          setAppVolume(confirmed);
+          // Some Windows audio sessions briefly report their creation default
+          // (100) while the requested value is already being applied. Never
+          // feed that transient value back into the renderer or the UI.
+          if (Math.abs(confirmed - requested) <= 2) {
+            volumeCommitRetryRef.current = 0;
+            volumeValueRef.current = confirmed;
+            setAppVolume(confirmed);
+          } else if (volumeCommitRetryRef.current < 3) {
+            volumeCommitRetryRef.current += 1;
+            volumeCommitQueuedRef.current = true;
+          }
         }
       })
       .catch(() => setVolumeReady(false))
@@ -2757,7 +2924,7 @@ function Content() {
           volumeCommitTimerRef.current = window.setTimeout(() => {
             volumeCommitTimerRef.current = 0;
             flushAppVolumeCommit();
-          }, 20);
+          }, 80);
         }
       });
   }
@@ -2766,6 +2933,8 @@ function Content() {
     const next = clamp(Math.round(nextVolume), 0, 100);
     volumeValueRef.current = next;
     volumeInteractionAtRef.current = Date.now();
+    volumeObservedRef.current = { value: next, count: 0 };
+    volumeCommitRetryRef.current = 0;
     setAppVolume(next);
     setVolumeReady(true);
     saveSourceVolume(sourceVolumeStorageKey(activeServiceKey), next);
@@ -2812,19 +2981,15 @@ function Content() {
     setShowSettings(false);
     setLoading(true);
     setMediaVisible(false);
-    setViewEpoch((value) => value + 1);
     window.setTimeout(() => {
       void refresh(true);
       setMediaVisible(true);
     }, 0);
   }
   useEffect(() => {
-    // Do not animate a metadata-only change while artwork is still resolving.
-    // This prevents the default note cover from flashing before the real image.
-    if (coverResolving && !spotifyPaused) {
-      setMediaVisible(true);
-      return;
-    }
+    // Keep the current media fully visible while the next artwork is preloaded.
+    // Toggling opacity here caused repeated flashes as metadata and cover
+    // responses completed at slightly different times.
     if (!mediaKeyRef.current) {
       mediaKeyRef.current = stableMediaKey;
       setMediaVisible(true);
@@ -2834,27 +2999,24 @@ function Content() {
     if (mediaKeyRef.current === stableMediaKey) return;
 
     mediaKeyRef.current = stableMediaKey;
-    setMediaVisible(false);
-    const timer = window.setTimeout(() => {
-      setMediaVisible(true);
-    }, 90);
-
-    return () => window.clearTimeout(timer);
-  }, [coverResolving, coverUrl, spotifyPaused, stableMediaKey]);
+    setMediaVisible(true);
+  }, [stableMediaKey]);
 
   useEffect(() => {
     const title = current?.title?.trim() ?? "";
     const artist = current?.artist?.trim() ?? "";
     const album = current?.album?.trim() ?? "";
     const activeService = activeServiceKey;
-    const key = `${activeService}|${spotifyCoverActive ? "spotify-api" : coverSource}|${title}|${artist}|${album}`;
+    const key = `${activeService}|${title.toLocaleLowerCase()}|${artist.toLocaleLowerCase()}`;
 
-    if (!title || spotifyPaused) {
+    if (!title) {
       coverRequestRef.current += 1;
       setCoverResolving(false);
       if (!coverClearTimerRef.current) {
         coverClearTimerRef.current = window.setTimeout(() => {
           coverClearTimerRef.current = 0;
+          coverUrlRef.current = "";
+          coverIdentityRef.current = "";
           setCoverUrl("");
         }, 1800);
       }
@@ -2865,13 +3027,20 @@ function Content() {
       coverClearTimerRef.current = 0;
     }
 
+    // Playback status, progress, shuffle, repeat, volume and late album metadata
+    // must never reload the artwork for the same visible track.
+    if (coverIdentityRef.current === key && coverUrlRef.current) {
+      setCoverResolving(false);
+      return;
+    }
+
     const immediateArtwork = String(current?.artworkUrl ?? "");
     const requestId = coverRequestRef.current + 1;
     coverRequestRef.current = requestId;
     let cancelled = false;
 
     const commitPreloadedCover = (url: string) => {
-      if (!url || url === coverUrl) {
+      if (!url || (coverIdentityRef.current === key && url === coverUrlRef.current)) {
         setCoverResolving(false);
         return;
       }
@@ -2886,6 +3055,8 @@ function Content() {
           if (oldest === undefined) break;
           coverCacheRef.current.delete(oldest);
         }
+        coverUrlRef.current = url;
+        coverIdentityRef.current = key;
         setCoverUrl(url);
         setCoverResolving(false);
       };
@@ -2903,6 +3074,8 @@ function Content() {
     const cached = coverCacheRef.current.get(key);
     if (cached) {
       setCoverResolving(false);
+      coverUrlRef.current = cached;
+      coverIdentityRef.current = key;
       setCoverUrl(cached);
       return;
     }
@@ -2932,7 +3105,7 @@ function Content() {
     return () => {
       cancelled = true;
     };
-  }, [current?.title, current?.artist, current?.album, current?.artworkUrl, coverSource, spotifyCoverActive, spotifyPaused, activeServiceKey, t.coverFailed, viewEpoch]);
+  }, [current?.title, current?.artist, current?.album, current?.artworkUrl, coverSource, spotifyCoverActive, activeServiceKey, t.coverFailed]);
 
   useEffect(() => () => {
     if (coverClearTimerRef.current) window.clearTimeout(coverClearTimerRef.current);
@@ -3145,7 +3318,6 @@ function Content() {
       `}</style>
       <PanelSectionRow>
         <div
-          key={viewEpoch}
           ref={qamRootRef}
           style={{ ...qamCenterRowStyle, ["--np-accent" as any]: accentForKey(enabledAppKeys[0]) }}
         >
@@ -3201,7 +3373,7 @@ function Content() {
               </div>
             </div>
 
-            {spotifyPaused ? null : <ProgressView current={current} clock={clock} snapshotAt={snapshotAt} />}
+            {spotifyPaused ? null : <ProgressView current={current} snapshotAt={snapshotAt} />}
 
             <div style={{ height: "14px" }} />
 
@@ -3245,7 +3417,8 @@ function Content() {
                 disabled={controlsDisabled || !current?.canShuffle}
                 onClick={() => void runAction(
                   () => shuffleAction(),
-                  () => patchCurrentPlayer((player) => ({ ...player, shuffleActive: !player.shuffleActive }))
+                  () => patchCurrentPlayer((player) => ({ ...player, shuffleActive: !player.shuffleActive })),
+                  [1200]
                 )}
               >
                 <FaRandom />
@@ -3279,7 +3452,8 @@ function Content() {
                       : player.repeatMode === "List"
                         ? "Track"
                         : "Off",
-                  }))
+                  })),
+                  [1200]
                 )}
               >
                 <RepeatIcon repeatMode={repeatMode} />
@@ -3393,7 +3567,7 @@ function Content() {
                 <div style={{ height: "6px" }} />
 
                 <Focusable style={{ ...centeredColumnStyle, gap: "6px" }} flow-children="vertical">
-                  {enabledApps.filter((app) => app.key !== "localMusic").map((app) => {
+                  {enabledApps.filter((app) => app.key !== "localMusic" && app.key !== "spotify").map((app) => {
                     const Icon = app.Icon;
 
                     return (

@@ -6,13 +6,14 @@ release/
 __pycache__/
 *.pyc
 
-# --- Binari compilati dei bridge (ricostruibili dai sorgenti, distribuiti nello zip installer) ---
+# --- Binari compilati (ricostruibili dai sorgenti, distribuiti via GitHub Releases) ---
 *.exe
 *.pdb
 bin/
+AppVolumeBridge/publish/
 AppVolumeBridge/bin/
 AppVolumeBridge/obj/
-AppVolumeBridge/publish/
+ThumbnailBridge/publish/
 ThumbnailBridge/bin/
 ThumbnailBridge/obj/
 SpotifyPlaybackBridge/target/

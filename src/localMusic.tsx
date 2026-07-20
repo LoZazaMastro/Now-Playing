@@ -269,7 +269,7 @@ function LocalMusicPickerModal({ initialPath, closeModal, onAdd }: {
         .npLocalPicker button.npLocalPickerConfirm{color:#fff!important;background:linear-gradient(135deg,rgba(217,163,55,.96),rgba(179,124,22,.96))!important;border:1px solid rgba(255,226,159,.42)!important;box-shadow:0 8px 24px rgba(128,82,7,.24)!important}
         .npLocalPicker button.npLocalPickerConfirm:hover,.npLocalPicker button.npLocalPickerConfirm:focus,.npLocalPicker button.npLocalPickerConfirm.gpfocus{background:linear-gradient(135deg,#e1ad43,#c18a24)!important;border-color:rgba(255,244,211,.78)!important;box-shadow:0 0 0 2px rgba(255,255,255,.72),0 0 24px rgba(217,163,55,.38)!important}
       `}</style>
-      <div className="npLocalPicker" style={{ width: "min(46rem, 86vw)", maxWidth: "100%" }}>
+      <Focusable className="npLocalPicker" flow-children="vertical" style={{ position: "fixed", left: "50%", top: "50%", transform: "translate(-50%,-50%)", zIndex: 10000, width: "min(46rem, calc(100vw - 72px))", height: "min(42rem, calc(100vh - 72px))", maxWidth: "100%", display: "grid", gridTemplateRows: "auto auto auto minmax(0,1fr)", gap: 10, padding: 18, borderRadius: 8, border: "1px solid rgba(255,255,255,.16)", background: "rgba(16,17,18,.98)", boxShadow: "0 28px 90px rgba(0,0,0,.72)", overflow: "hidden", boxSizing: "border-box" }}>
         <div style={{ fontSize: "1.25rem", fontWeight: 700, marginBottom: 12 }}>{t.pickerTitle}</div>
         <Focusable flow-children="horizontal" style={{ display: "grid", gridTemplateColumns: "auto minmax(0,1fr) auto", gap: 8 }}>
           <DialogButton className="npLocalPickerBack" style={{ width: 46, minWidth: 46, padding: 0, display: "flex", alignItems: "center", justifyContent: "center" }} disabled={loading || adding} onClick={() => void load(parentWindowsPath(listing.path))}><span><FaArrowLeft /></span></DialogButton>
@@ -279,7 +279,7 @@ function LocalMusicPickerModal({ initialPath, closeModal, onAdd }: {
         <DialogButton className="npLocalPickerConfirm" style={{ width: "100%", marginTop: 10 }} disabled={loading || adding} onClick={() => void add("folder", listing.path)}>
           <span style={{ display: "flex", alignItems: "center", gap: 9 }}><FaCheck />{t.addCurrentFolder}</span>
         </DialogButton>
-        <Focusable style={{ marginTop: 10, maxHeight: "52vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 5 }}>
+        <Focusable flow-children="vertical" style={{ minHeight: 0, overflowY: "auto", overflowX: "hidden", display: "flex", flexDirection: "column", gap: 6, padding: "2px 5px 2px 2px" }}>
           {listing.dirs.map((dir) => (
             <DialogButton key={`dir:${dir}`} disabled={loading || adding} onClick={() => void load(joinWindowsPath(listing.path, dir))}>
               <span style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}><FaFolder /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{dir}</span></span>
@@ -292,7 +292,7 @@ function LocalMusicPickerModal({ initialPath, closeModal, onAdd }: {
           ))}
           {!loading && !listing.dirs.length && !listing.files.length ? <div style={{ padding: 14, opacity: .62 }}>{t.noAudioFiles}</div> : null}
         </Focusable>
-      </div>
+      </Focusable>
     </ModalRoot>
   );
 }
@@ -405,24 +405,28 @@ export function LocalMusicSettingsPanel({ selectedService: _selectedService }: {
       const result = kind === "file" ? await python.addLocalMusicFile(path) : await python.addLocalMusicFolder(path);
       if (!result.ok) throw new Error(result.error || t.openFolderError);
       if (result.settings) setSettings(result.settings);
-
-      setCacheBusy(true);
-      const cacheResult = await python.buildLocalMusicCache();
-      if (!cacheResult.ok) throw new Error(cacheResult.error || t.playerError);
-      COVER_CACHE.clear();
-      ARTIST_PROFILE_CACHE.clear();
-      if (cacheResult.settings) setSettings(cacheResult.settings);
-      else await reload();
-      setCacheProgress((previous) => ({ ...previous, active: false, phase: "complete", current: "", completed: previous.total || previous.completed, total: previous.total || previous.completed }));
-      window.setTimeout(() => setCacheProgress((previous) => previous.phase === "complete" ? { active: false, phase: "idle", current: "", completed: 0, total: 0 } : previous), 2600);
-      toaster.toast({ title: t.yourMusic, body: t.scanComplete, duration: 2400 });
+      window.setTimeout(() => {
+        setCacheBusy(true);
+        void python.buildLocalMusicCache()
+          .then(async (cacheResult) => {
+            if (!cacheResult.ok) throw new Error(cacheResult.error || t.playerError);
+            COVER_CACHE.clear();
+            ARTIST_PROFILE_CACHE.clear();
+            if (cacheResult.settings) setSettings(cacheResult.settings);
+            else await reload();
+            setCacheProgress((previous) => ({ ...previous, active: false, phase: "complete", current: "", completed: previous.total || previous.completed, total: previous.total || previous.completed }));
+            window.setTimeout(() => setCacheProgress((previous) => previous.phase === "complete" ? { active: false, phase: "idle", current: "", completed: 0, total: 0 } : previous), 2600);
+            toaster.toast({ title: t.yourMusic, body: t.scanComplete, duration: 2400 });
+          })
+          .catch((error: any) => showError(String(error?.message ?? error ?? t.playerError)))
+          .finally(() => setCacheBusy(false));
+      }, 0);
       return true;
     } catch (error: any) {
       const message = String(error?.message ?? error ?? "");
       if (message && !/cancel/i.test(message)) showError(message || t.openFolderError);
       return false;
     } finally {
-      setCacheBusy(false);
       setBusy(false);
       window.setTimeout(() => settingsPanelRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" }), 0);
     }
@@ -437,6 +441,8 @@ export function LocalMusicSettingsPanel({ selectedService: _selectedService }: {
         closeModal={closeModal}
         onAdd={addSelection}
       />,
+      undefined,
+      { strTitle: t.pickerTitle, bNeverPopOut: true, bHideActionIcons: true },
     );
   }
 
@@ -992,6 +998,7 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
       const detail = event instanceof CustomEvent ? event.detail : null;
       if (detail?.source !== "localMusic") return;
       const next = Math.max(0, Math.min(100, Number(detail.volume ?? saved)));
+      if (detail.origin !== "observed") volumeInteractionAtRef.current = Date.now();
       volumeRef.current = next;
       setVolume(next);
       localAudioPlayer.setVolume(next);
@@ -1005,7 +1012,7 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
     clearRestoreFocusTimers();
   }, [clearRestoreFocusTimers]);
   useEffect(() => {
-    if (Date.now() - volumeInteractionAtRef.current <= 250) return;
+    if (Date.now() - volumeInteractionAtRef.current <= 1200) return;
     volumeRef.current = state.volume;
     setVolume(state.volume);
   }, [state.volume]);

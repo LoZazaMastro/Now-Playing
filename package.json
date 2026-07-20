@@ -1,6 +1,6 @@
 {
   "name": "now-playing",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Console-style Windows music controls, fullscreen visuals, optional Spotify browsing and a built-in local music library/player for Decky Loader.",
   "author": "LoZazaMastro",
   "type": "module",

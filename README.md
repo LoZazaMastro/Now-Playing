@@ -216,7 +216,7 @@ Some applications may expose only part of their controls. Shuffle, repeat, seeki
 - Restart the music application and reopen Now Playing.
 - Fully restart Steam if the plugin was just installed or updated.
 
-For external services, start a track once and confirm that Windows media controls can see it. Now Playing 2.0.0 actively selects the session that matches the chosen source, including TIDAL, Apple Music, Deezer, Amazon Music and SoundCloud. Spotify is presented as one source: its browsing data comes from the configured Spotify connection, while playback can use the bundled local player after Spotify has been reconnected with the required permission. Until then, the existing Spotify API playback path remains available.
+For external services, start a track once and confirm that Windows media controls can see it. Now Playing 2.1.0 actively selects the session that matches the chosen source, including TIDAL, Apple Music, Deezer, Amazon Music and SoundCloud. Spotify is presented as one source: its browsing data comes from the configured Spotify connection, while playback can use the bundled local player after Spotify has been reconnected with the required permission. Until then, the existing Spotify API playback path remains available.
 
 ### Artwork is incorrect
 
@@ -232,7 +232,7 @@ The active application may not expose that command through Windows SMTC. Now Pla
 
 ### Per-app volume is unavailable
 
-Start playback first so Windows creates an audio session for the selected music application. Now Playing remembers a separate volume for every source and repeatedly applies that saved value while a newly opened Windows session is registering. Spotify uses one saved volume preference for both its local player and the Spotify desktop fallback. Your Music applies its saved value directly to the live HTML audio engine without restoring an old playback session.
+Start playback first so Windows creates an audio session for the selected music application. Now Playing remembers a separate volume for every source and controls Windows Core Audio directly, without a separate volume helper executable. Spotify uses the same saved value in QAM, Big Picture and the integrated Spotify player; Your Music applies it directly to the live HTML audio engine. Delayed responses are revision-checked so an older command cannot overwrite the latest value.
 
 ### The player becomes slow or stops updating
 

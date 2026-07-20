@@ -608,6 +608,10 @@ class Plugin:
         self.topbar_enabled = False
         self.topbar_left = False
         self._topbar_task = None
+        self._spotify_warmup_task: Optional[asyncio.Task[Any]] = None
+        self._spotify_background_monitor_task: Optional[asyncio.Task[Any]] = None
+        self._spotify_auto_source_suppress_until = 0.0
+        self._spotify_connect_volume_changed_at = 0.0
         self._topbar_cached_label = ""
         self._topbar_cached_service = "music"
         self._topbar_cached_at = 0.0
@@ -666,6 +670,8 @@ class Plugin:
         self._cover_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="NowPlaying-Cover")
         self._artist_background_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="NowPlaying-BackgroundSearch")
         self._volume_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="NowPlaying-Volume")
+        self._volume_request_lock = threading.Lock()
+        self._volume_request_revisions: Dict[str, int] = {}
         self._spotify_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="NowPlaying-Spotify")
         self._source_lifecycle_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="NowPlaying-SourceLifecycle")
 
@@ -2706,16 +2712,15 @@ class Plugin:
             self._direct_volume_available = False
             return None
 
-    def _direct_session_matches(self, session: Any, names: List[str]) -> Tuple[bool, str]:
+    def _direct_session_matches(self, session: Any, names: List[str], process_names: Dict[int, str]) -> Tuple[bool, str]:
         try:
             display_name = str(getattr(session, "DisplayName", "") or "")
         except Exception:
             display_name = ""
         process_name = ""
         try:
-            process = getattr(session, "Process", None)
-            if process is not None:
-                process_name = str(process.name() or "")
+            process_id = int(getattr(session, "ProcessId", 0) or 0)
+            process_name = str(process_names.get(process_id, "") or "")
         except Exception:
             process_name = ""
         haystack = f"{process_name} {display_name}".strip().lower()
@@ -2724,8 +2729,13 @@ class Plugin:
 
     def _find_direct_volume_sessions(self, audio_utilities: Any, names: List[str]) -> List[Tuple[Any, str]]:
         matches: List[Tuple[Any, str]] = []
+        process_names = {
+            int(item.get("pid") or 0): str(item.get("name") or "")
+            for item in self._native_process_entries()
+            if int(item.get("pid") or 0) > 0
+        }
         for session in audio_utilities.GetAllSessions():
-            matched, label = self._direct_session_matches(session, names)
+            matched, label = self._direct_session_matches(session, names, process_names)
             if matched:
                 matches.append((session, label))
         return matches
@@ -3266,7 +3276,7 @@ class Plugin:
                 return False
             # Keep Spotify Connect's internal mixer at full scale. The user-facing
             # slider controls the bridge's dedicated Windows Core Audio session.
-            initial_volume = 100
+            initial_volume = clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
             audio_quality = int(self.spotify_settings.get("audio_quality", 320) or 320)
             if audio_quality not in {96, 160, 320}:
                 audio_quality = 320
@@ -3839,29 +3849,60 @@ class Plugin:
                 if result.get("ok"):
                     volume = clamp_value(result.get("volume", self.spotify_settings.get("connect_volume", 100)), 0, 100)
                     self.spotify_settings["connect_volume"] = volume
-                    return {**result, "ok": True, "volume": volume, "transport": "windows-mixer"}
+                    origin = "spotify-connect" if time.monotonic() - self._spotify_connect_volume_changed_at <= 4.0 else "windows-mixer"
+                    return {**result, "ok": True, "volume": volume, "transport": "windows-mixer", "origin": origin}
                 volume = clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
-                return {"ok": True, "volume": volume, "matched": "SpotifyPlaybackBridge.exe", "transport": "saved"}
+                return {"ok": True, "volume": volume, "matched": "SpotifyPlaybackBridge.exe", "transport": "saved", "origin": "saved"}
             return await self._run_in_executor(self._volume_executor, get_spotify_volume)
         return await self._run_in_executor(self._volume_executor, self._run_app_volume, None)
 
-    async def set_app_volume(self, volume: int, service: str = "") -> Dict[str, Any]:
+    async def set_app_volume(self, volume: int, service: str = "", revision: int = 0) -> Dict[str, Any]:
         active = self._normalized_service_key(service) if service else self._normalized_active_service()
         requested = clamp_value(volume, 0, 100)
+        request_key = active or "active"
+        request_revision = max(0, int(revision or 0))
+        with self._volume_request_lock:
+            self._volume_request_revisions[request_key] = max(
+                request_revision,
+                int(self._volume_request_revisions.get(request_key, 0) or 0),
+            )
+
+        def request_is_current() -> bool:
+            if request_revision <= 0:
+                return True
+            with self._volume_request_lock:
+                return request_revision >= int(self._volume_request_revisions.get(request_key, 0) or 0)
+
+        def stale_result() -> Dict[str, Any]:
+            return {"ok": True, "stale": True, "volume": requested, "matched": request_key}
+
         if active == "localMusic":
+            if not request_is_current():
+                return stale_result()
             return await self.set_local_music_volume(requested)
         if active == "spotify":
             def set_spotify_volume() -> Dict[str, Any]:
+                if not request_is_current():
+                    return stale_result()
                 self.spotify_settings["connect_volume"] = requested
                 self._save_spotify_settings()
                 result = self._run_spotify_output_volume(requested)
                 if not result.get("ok"):
                     return {**result, "ok": False, "volume": requested, "matched": "SpotifyPlaybackBridge.exe", "transport": "windows-mixer"}
-                return {**result, "ok": True, "volume": clamp_value(result.get("volume", requested), 0, 100), "transport": "windows-mixer"}
+                return {
+                    **result,
+                    "ok": True,
+                    "volume": clamp_value(result.get("volume", requested), 0, 100),
+                    "transport": "windows-mixer",
+                }
             return await self._run_in_executor(self._volume_executor, set_spotify_volume)
-        return await self._run_in_executor(
-            self._volume_executor, self._run_app_volume, requested
-        )
+
+        def set_external_volume() -> Dict[str, Any]:
+            if not request_is_current():
+                return stale_result()
+            return self._run_app_volume(requested)
+
+        return await self._run_in_executor(self._volume_executor, set_external_volume)
 
     # ------------------------------------------------------------------
     # Local music library / player
@@ -4379,6 +4420,8 @@ class Plugin:
             auto_launch = bool(self._source_behavior_settings.get("auto_launch", True))
             close_on_switch = bool(self._source_behavior_settings.get("close_on_switch", True))
             source_changed = previous_service != next_service
+            if source_changed:
+                self._spotify_auto_source_suppress_until = time.monotonic() + 10.0
 
             if source_changed:
                 self._topbar_cached_label = ""
@@ -4468,6 +4511,9 @@ class Plugin:
 
             return self.active_service
 
+    async def get_active_service(self) -> str:
+        return self._normalized_active_service()
+
     async def get_local_music_settings(self) -> Dict[str, Any]:
         cache_stats = self._split_asset_stats([
             self.local_music_cover_dir,
@@ -4524,12 +4570,7 @@ class Plugin:
             folders.append(normalized)
             self._local_music_settings["folders"] = folders
             self._save_local_music_settings()
-        try:
-            stats = await self._run_in_executor(self._local_music_executor, self._local_music_scan_sync)
-            return {"ok": True, "stats": stats, "settings": await self.get_local_music_settings()}
-        except Exception as exc:
-            self._log(f"local music folder add rescan error: {exc}")
-            return {"ok": False, "error": str(exc), "settings": await self.get_local_music_settings()}
+        return {"ok": True, "added": added, "settings": await self.get_local_music_settings()}
 
     async def list_local_music_directory(self, path: str = "") -> Dict[str, Any]:
         supported = {".mp3", ".flac", ".m4a", ".mp4", ".aac", ".ogg", ".opus", ".wav", ".wma", ".aiff", ".aif", ".ape", ".wv", ".mka"}
@@ -4563,11 +4604,7 @@ class Plugin:
             files.append(normalized)
             self._local_music_settings["files"] = files
             self._save_local_music_settings()
-        try:
-            stats = await self._run_in_executor(self._local_music_executor, self._local_music_scan_sync)
-            return {"ok": True, "file": normalized, "stats": stats, "settings": await self.get_local_music_settings()}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc), "settings": await self.get_local_music_settings()}
+        return {"ok": True, "file": normalized, "settings": await self.get_local_music_settings()}
 
     async def remove_local_music_file(self, path: str) -> Dict[str, Any]:
         normalized = os.path.normcase(os.path.abspath(str(path or "")))
@@ -6279,41 +6316,117 @@ class Plugin:
         return {"items": ordered, "limit": len(ordered), "offset": 0, "total": len(ordered), "next": None}
 
     def _spotify_recent_releases_for_followed_artists(self, limit: int = 20) -> List[Dict[str, Any]]:
-        followed = self._spotify_collect_followed_artists(60, 21600)
+        requested = max(1, min(20, int(limit or 20)))
+        seeds: List[Dict[str, Any]] = []
+        seen_artists: Set[str] = set()
+
+        def add_artist(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            artist_id = str(value.get("id") or "").strip()
+            if not artist_id or artist_id in seen_artists:
+                return
+            seen_artists.add(artist_id)
+            seeds.append(value)
+
+        try:
+            recent = self._spotify_api_sync(
+                "/me/player/recently-played",
+                params={"limit": 50},
+                cache_seconds=1800,
+            )
+            for wrapper in recent.get("items", []) if isinstance(recent, dict) else []:
+                track = wrapper.get("track") if isinstance(wrapper, dict) else None
+                for artist in track.get("artists", []) if isinstance(track, dict) else []:
+                    add_artist(artist)
+        except Exception as exc:
+            self._log(f"Spotify recent artists unavailable: {exc}")
+
+        followed = self._spotify_collect_followed_artists(80, 21600)
         artists_container = followed.get("artists", {}) if isinstance(followed, dict) else {}
-        artists = artists_container.get("items", []) if isinstance(artists_container, dict) else []
-        releases: List[Dict[str, Any]] = []
-        seen: Set[str] = set()
-        for artist in [item for item in artists if isinstance(item, dict) and item.get("id")][:8]:
+        followed_items = artists_container.get("items", []) if isinstance(artists_container, dict) else []
+        for artist in followed_items if isinstance(followed_items, list) else []:
+            add_artist(artist)
+        seeds = seeds[:16]
+
+        buckets: List[List[Dict[str, Any]]] = []
+        official_album_fallback_budget = 3
+        for artist in seeds:
             artist_id = str(artist.get("id") or "")
+            album_params = {"include_groups": "album,single", "limit": 6, "market": "from_token"}
+            album_query = urllib.parse.urlencode(album_params)
+            album_cache_key = f"GET:https://api.spotify.com/v1/artists/{artist_id}/albums?{album_query}"
             try:
-                page = self._spotify_api_sync(
-                    f"/artists/{artist_id}/albums",
-                    params={"include_groups": "album,single", "limit": 10, "market": "from_token"},
-                    cache_seconds=21600,
-                )
+                page = self._spotify_cached_response(album_cache_key, 21600)
+                if not isinstance(page, dict):
+                    page = self._spotify_scraper_api_sync(
+                        f"/artists/{artist_id}/albums",
+                        album_params,
+                    )
+                    if isinstance(page, dict):
+                        self._spotify_store_cached_response(album_cache_key, page)
+                if not isinstance(page, dict) and official_album_fallback_budget > 0:
+                    official_album_fallback_budget -= 1
+                    page = self._spotify_api_sync(
+                        f"/artists/{artist_id}/albums",
+                        params=album_params,
+                        cache_seconds=21600,
+                    )
             except Exception:
                 continue
-            for album in page.get("items", []) if isinstance(page, dict) and isinstance(page.get("items"), list) else []:
-                if not isinstance(album, dict):
+            artist_albums: List[Dict[str, Any]] = []
+            for raw_album in page.get("items", []) if isinstance(page, dict) and isinstance(page.get("items"), list) else []:
+                if not isinstance(raw_album, dict) or not raw_album.get("id"):
                     continue
+                album = dict(raw_album)
+                if not isinstance(album.get("artists"), list) or not album.get("artists"):
+                    album["artists"] = [
+                        {
+                            "id": artist_id,
+                            "uri": str(artist.get("uri") or f"spotify:artist:{artist_id}"),
+                            "name": str(artist.get("name") or "").strip(),
+                            "type": "artist",
+                        }
+                    ]
+                artist_albums.append(album)
+            artist_albums.sort(
+                key=lambda item: str(item.get("release_date") or ""),
+                reverse=True,
+            )
+            if artist_albums:
+                buckets.append(artist_albums)
+
+        releases: List[Dict[str, Any]] = []
+        seen_albums: Set[str] = set()
+        # Round-robin prevents one artist from occupying an entire shelf when
+        # scraper metadata has no release dates.
+        for round_index in range(3):
+            for bucket in buckets:
+                if round_index >= len(bucket):
+                    continue
+                album = bucket[round_index]
                 album_id = str(album.get("id") or "")
-                if not album_id or album_id in seen:
+                if not album_id or album_id in seen_albums:
                     continue
-                seen.add(album_id)
+                seen_albums.add(album_id)
                 releases.append(album)
-        releases.sort(key=lambda item: str(item.get("release_date") or ""), reverse=True)
-        if len(releases) < limit:
+                if len(releases) >= requested:
+                    return releases
+
+        if len(releases) < requested:
             try:
                 saved = self._spotify_collect_offset_pages("/me/albums", max_items=50, cache_seconds=21600)
                 for wrapper in saved.get("items", []) if isinstance(saved, dict) and isinstance(saved.get("items"), list) else []:
                     album = wrapper.get("album") if isinstance(wrapper, dict) else None
                     album_id = str((album or {}).get("id") or "") if isinstance(album, dict) else ""
-                    if album_id and album_id not in seen:
-                        seen.add(album_id); releases.append(album)
+                    if album_id and album_id not in seen_albums:
+                        seen_albums.add(album_id)
+                        releases.append(album)
+                        if len(releases) >= requested:
+                            break
             except Exception:
                 pass
-        return releases[:limit]
+        return releases[:requested]
 
     async def spotify_get_home(self) -> Dict[str, Any]:
         def work() -> Dict[str, Any]:
@@ -6851,7 +6964,7 @@ class Plugin:
         session = connection = request = None
         try:
             session = winhttp.WinHttpOpen(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.0.0",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.1.0",
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 None,
                 None,
@@ -7042,7 +7155,7 @@ class Plugin:
         params = {"query": f'artist:"{name}"', "fmt": "json", "limit": max(8, min(25, int(limit) * 3))}
         request = urllib.request.Request(
             "https://musicbrainz.org/ws/2/artist/?" + urllib.parse.urlencode(params),
-            headers={"User-Agent": "NowPlayingDecky/2.0.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
+            headers={"User-Agent": "NowPlayingDecky/2.1.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -7096,7 +7209,7 @@ class Plugin:
                 url = f"https://webservice.fanart.tv/{version}/music/{urllib.parse.quote(clean_mbid, safe='')}?" + urllib.parse.urlencode({"api_key": api_key})
                 request = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "NowPlayingDecky/2.0.0", "Accept": "application/json"},
+                    headers={"User-Agent": "NowPlayingDecky/2.1.0", "Accept": "application/json"},
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -7144,7 +7257,7 @@ class Plugin:
             url = "https://www.theaudiodb.com/api/v1/json/2/search.php?" + urllib.parse.urlencode({"s": name})
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "NowPlayingDecky/2.0.0", "Accept": "application/json"},
+                headers={"User-Agent": "NowPlayingDecky/2.1.0", "Accept": "application/json"},
             )
             try:
                 with urllib.request.urlopen(request, timeout=8) as response:
@@ -8335,7 +8448,7 @@ class Plugin:
         now_mono = time.monotonic()
         report = {
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "pluginVersion": "2.0.0",
+            "pluginVersion": "2.1.0",
             "python": sys.version,
             "platform": platform.platform(),
             "backend": {
@@ -8447,7 +8560,7 @@ class Plugin:
         operation_durations["totalBeforeWrite"] = round((time.monotonic() - diagnostic_started) * 1000, 1)
         runtime_logs = self._read_runtime_logs_for_diagnostics()
         content = (
-            "NOW PLAYING 2.0.0 DIAGNOSTICS\n"
+            "NOW PLAYING 2.1.0 DIAGNOSTICS\n"
             + json.dumps(report, ensure_ascii=False, indent=2)
             + "\n\nSTRUCTURED EVENTS (oldest to newest)\n"
             + "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in structured_events)
@@ -8672,7 +8785,7 @@ class Plugin:
         try:
             request = urllib.request.Request(
                 f"http://127.0.0.1:{TOPBAR_CEF_PORT}/json/list",
-                headers={"User-Agent": "Decky Now Playing/2.0.0"},
+                headers={"User-Agent": "Decky Now Playing/2.1.0"},
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 targets = json.loads(response.read().decode("utf-8"))
@@ -8805,6 +8918,102 @@ class Plugin:
                 self._log(f"topbar loop error: {exc}")
             await asyncio.sleep(TOPBAR_REINJECT_SECONDS)
 
+    async def _warm_spotify_session_background(self) -> None:
+        if not bool(self.spotify_settings.get("enabled")):
+            return
+        if not str(self.spotify_settings.get("client_id") or "").strip():
+            return
+        if not bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")):
+            return
+        try:
+            started = await self._run_in_executor(self._spotify_executor, self._spotify_playback_bridge_start_sync)
+            if started:
+                profile = self.spotify_settings.get("profile") or {}
+                display_name = str(profile.get("display_name") or profile.get("id") or "Spotify") if isinstance(profile, dict) else "Spotify"
+                with self._spotify_auth_lock:
+                    self._spotify_auth_status = {"state": "authenticated", "message": f"Connected as {display_name}"}
+                self._log("Spotify background session ready")
+            else:
+                self._log(f"Spotify background session unavailable: {self._spotify_playback_bridge_error}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log(f"Spotify background session error: {exc}")
+
+    async def _monitor_spotify_session_background(self) -> None:
+        previous_status = ""
+        previous_uri = ""
+        session_volume_applied = False
+        while True:
+            delay = 1.2
+            try:
+                if not bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")):
+                    previous_status = ""
+                    previous_uri = ""
+                    session_volume_applied = False
+                    await asyncio.sleep(delay)
+                    continue
+
+                payload = await self._run_in_executor(
+                    self._spotify_executor,
+                    self._spotify_playback_bridge_request_sync,
+                    "/snapshot",
+                    0.8,
+                )
+                ready = bool(payload.get("ready")) if isinstance(payload, dict) else False
+                active = bool(payload.get("active")) if isinstance(payload, dict) else False
+                status = str(payload.get("status") or "Stopped") if isinstance(payload, dict) else "Stopped"
+                uri = str(payload.get("uri") or "") if isinstance(payload, dict) else ""
+                delay = 0.45 if ready and active else 1.2
+
+                if ready and active:
+                    soft_volume = clamp_value(payload.get("volume", 100), 0, 100)
+                    desired_volume = soft_volume if soft_volume != 100 else clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
+                    if soft_volume != 100 or not session_volume_applied:
+                        result = await self._run_in_executor(self._volume_executor, self._run_spotify_output_volume, desired_volume)
+                        if result.get("ok"):
+                            self.spotify_settings["connect_volume"] = desired_volume
+                            self._save_spotify_settings()
+                            if soft_volume != 100:
+                                self._spotify_connect_volume_changed_at = time.monotonic()
+                            session_volume_applied = True
+                            if soft_volume != 100:
+                                await self._run_in_executor(
+                                    self._spotify_executor,
+                                    self._spotify_playback_bridge_request_sync,
+                                    "/action/volume?value=100",
+                                    0.8,
+                                )
+
+                    playback_started = status == "Playing" and (
+                        previous_status != "Playing" or (uri and uri != previous_uri)
+                    )
+                    if (
+                        playback_started
+                        and self._normalized_active_service() != "spotify"
+                        and time.monotonic() >= self._spotify_auto_source_suppress_until
+                    ):
+                        previous_service = self._normalized_active_service()
+                        self.active_service = "spotify"
+                        self._source_behavior_settings["active_service"] = "spotify"
+                        self._save_source_behavior_settings()
+                        self._topbar_cached_at = 0.0
+                        self._record_diagnostic_event(
+                            "spotify",
+                            "connect_playback_adopted",
+                            {"previousService": previous_service, "uri": uri},
+                        )
+                else:
+                    session_volume_applied = False
+
+                previous_status = status
+                previous_uri = uri
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log(f"Spotify background monitor error: {exc}")
+            await asyncio.sleep(delay)
+
     async def _main(self) -> None:
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.runtime_dir = self._resolve_runtime_dir()
@@ -8834,8 +9043,20 @@ class Plugin:
             self._topbar_task = asyncio.create_task(self._topbar_loop())
         except Exception as exc:
             self._log(f"topbar start error: {exc}")
+        try:
+            self._spotify_warmup_task = asyncio.create_task(self._warm_spotify_session_background())
+            self._spotify_background_monitor_task = asyncio.create_task(self._monitor_spotify_session_background())
+        except Exception as exc:
+            self._log(f"Spotify background session scheduling error: {exc}")
     async def _unload(self) -> None:
         self._shutdown_helper()
+        try:
+            if self._spotify_warmup_task and not self._spotify_warmup_task.done():
+                self._spotify_warmup_task.cancel()
+            if self._spotify_background_monitor_task and not self._spotify_background_monitor_task.done():
+                self._spotify_background_monitor_task.cancel()
+        except Exception:
+            pass
         try:
             await self._run_in_executor(self._spotify_executor, self._spotify_playback_bridge_stop_sync)
         except Exception:

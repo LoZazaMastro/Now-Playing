@@ -35,6 +35,8 @@ export type AppVolume = {
   ok: boolean;
   volume: number;
   matched?: string;
+  stale?: boolean;
+  origin?: string;
 };
 
 export type CoverSource = "online" | "windows";
@@ -189,8 +191,11 @@ export function getAppVolume(service = ""): Promise<AppVolume> {
   return call<[service: string], AppVolume>("get_app_volume", service);
 }
 
+let lastVolumeRevision = Date.now() * 1000;
+
 export function setAppVolume(volume: number, service = ""): Promise<AppVolume> {
-  return call<[volume: number, service: string], AppVolume>("set_app_volume", volume, service);
+  lastVolumeRevision = Math.max(lastVolumeRevision + 1, Date.now() * 1000);
+  return call<[volume: number, service: string, revision: number], AppVolume>("set_app_volume", volume, service, lastVolumeRevision);
 }
 
 export type PluginServiceRestartResult = {
@@ -505,6 +510,10 @@ export type LocalMusicResult<T = any> = {
 
 export function setActiveService(service: string): Promise<string> {
   return call<[service: string], string>("set_active_service", service);
+}
+
+export function getActiveService(): Promise<string> {
+  return call<[], string>("get_active_service");
 }
 
 export function getLocalMusicSettings(): Promise<LocalMusicSettings> {

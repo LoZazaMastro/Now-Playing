@@ -35,7 +35,7 @@ import { formatTranslation, getTranslations, localizeRuntimeMessage } from "./i1
 import { ArtistBackgroundPicker } from "./artistBackground";
 import type { SpotifyTranslation } from "./i18n";
 import { getSavedSourceVolume, saveSourceVolume, SOURCE_VOLUME_CHANGED_EVENT } from "./sourceVolume";
-import { SmoothProgressFill } from "./smoothProgress";
+import { SmoothProgressFill, SmoothProgressTime } from "./smoothProgress";
 
 const SPOTIFY_GREEN = "#1DB954";
 export const SPOTIFY_PLAYBACK_CHANGED_EVENT = "nowPlaying:spotify-playback-changed";
@@ -222,6 +222,11 @@ function artistText(item: any): string {
   if (Array.isArray(artists) && artists.length) {
     return artists.map((artist: any) => artist?.name).filter(Boolean).join(", ");
   }
+  const singleArtist = typeof item?.artist === "string"
+    ? item.artist
+    : String(item?.artist?.name ?? "");
+  if (singleArtist.trim()) return singleArtist.trim();
+  if (String(item?.type ?? "").toLowerCase() === "album") return "";
   return String(item?.owner?.display_name ?? item?.publisher ?? "Spotify");
 }
 
@@ -413,6 +418,7 @@ export function SpotifyPlusSettingsPanel({
   const [setupDetailsOpen, setSetupDetailsOpen] = useState(false);
   const [audioCacheBusy, setAudioCacheBusy] = useState(false);
   const [artistCacheBusy, setArtistCacheBusy] = useState(false);
+  const [refreshBusy, setRefreshBusy] = useState(false);
   const [artistCacheProgress, setArtistCacheProgress] = useState<python.SpotifyArtistCacheProgress>({ active: false, phase: "idle", current: "", completed: 0, total: 0 });
   const [artistCacheStats, setArtistCacheStats] = useState<python.AssetCacheStats>({ bytes: 0, files: 0 });
   const pollRef = useRef<number>(0);
@@ -842,6 +848,17 @@ export function SpotifyPlusSettingsPanel({
 
         <div style={{ marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
           <p style={{ margin: "0 2px 9px", fontSize: "0.67em", lineHeight: 1.42, opacity: 0.56 }}>{t.cacheExplanation}</p>
+          <DialogButton
+            style={fullButtonStyle}
+            disabled={refreshBusy}
+            onClick={() => {
+              setRefreshBusy(true);
+              void python.refreshSpotifyCache().finally(() => setRefreshBusy(false));
+            }}
+          >
+            <span><FaSyncAlt className={refreshBusy ? "npRestartSpin" : undefined} /> {t.refresh}</span>
+          </DialogButton>
+          <div style={{ height: "12px" }} />
           <div style={{ fontSize: "0.76em", fontWeight: 700, marginBottom: "7px" }}>{t.audioQuality}</div>
           <Focusable style={{ display: "flex", flexDirection: "column", gap: "6px", width: "100%" }} flow-children="vertical">
             {([96, 160, 320] as const).map((quality) => {
@@ -1454,20 +1471,6 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
     );
   }
 
-  async function refreshActiveView() {
-    clearSpotifyLibrarySessionCaches();
-    await python.refreshSpotifyCache().catch(() => {});
-    if (detail) {
-      requestDetail(detail);
-    } else if (tab === "home") {
-      loadHome();
-    } else if (tab === "library") {
-      loadLibrary(librarySection, true, true);
-    } else {
-      executeSearch();
-    }
-  }
-
   return (
     <>
       <style>{`
@@ -1568,14 +1571,6 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
           </div>
         ) : null}
         {detail ? renderDetail() : tab === "home" ? renderHome() : tab === "search" ? renderSearch() : renderLibrary()}
-        <div style={{ ...settingsCardStyle, marginTop: "14px" }}>
-          <SpotifyLogoTitle subtitle={home?.profile?.display_name ? formatSpotifyText(t.welcomeBack, { name: home.profile.display_name }) : t.yourMusicInsideSteam} />
-          <DialogButton style={{ ...fullButtonStyle, marginTop: "10px" }} disabled={loading} onClick={refreshActiveView}>
-            <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontSize: "0.78em" }}>
-              <FaSyncAlt /> {t.refresh}
-            </span>
-          </DialogButton>
-        </div>
       </Focusable>
     </>
   );
@@ -1826,7 +1821,6 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     return { selectedPlayer: player?.id ?? "", currentPlayer: player?.id ?? "", selected: player, players: player ? [player] : [] };
   });
   const [snapshotAt, setSnapshotAt] = useState(Date.now());
-  const [clock, setClock] = useState(Date.now());
   const [coverUrl, setCoverUrl] = useState("");
   const [appVolume, setAppVolume] = useState(100);
   const [volumeReady, setVolumeReady] = useState(false);
@@ -1845,6 +1839,11 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   const coverClearTimerRef = useRef<number>(0);
   const volumeTimerRef = useRef<number>(0);
   const volumeValueRef = useRef(100);
+  const volumeInteractionAtRef = useRef(0);
+  const volumeCommitInFlightRef = useRef(false);
+  const volumeCommitQueuedRef = useRef(false);
+  const volumeCommitRetryRef = useRef(0);
+  const volumeObservedRef = useRef<{ value: number; count: number }>({ value: -1, count: 0 });
   const pendingRestoreFocusKeyRef = useRef("");
   const restoreFocusTimersRef = useRef<number[]>([]);
   const restoringTabRef = useRef<BrowserTab | null>(null);
@@ -1861,10 +1860,6 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   const isPlaying = current?.status === "Playing";
   const durationMs = Math.max(0, Number(current?.length || 0));
   const basePositionMs = Math.max(0, Number(current?.position || 0));
-  const progressMs = Math.min(
-    durationMs || Number.MAX_SAFE_INTEGER,
-    basePositionMs + (isPlaying ? Math.max(0, clock - snapshotAt) : 0),
-  );
   const stablePlayerArtwork = coverUrl || String(current?.artworkUrl ?? "");
   const albumGlowImage = detail?.kind === "artist"
     ? ""
@@ -1880,7 +1875,13 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     try {
       const status = await python.getSpotifyApiStatus();
       rateLimitActiveRef.current = Boolean(status.active);
-      setRateLimitStatus(status);
+      setRateLimitStatus((previous) => (
+        previous.active === status.active
+        && previous.remainingSeconds === status.remainingSeconds
+        && previous.until === status.until
+          ? previous
+          : status
+      ));
     } catch {
       // This is a local backend status call. Preserve the last value on failure.
     }
@@ -1983,12 +1984,8 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
           // Publish title, artwork, timing and controls as one complete payload.
           // Between API polls the clock interpolates progress locally; the same
           // stale API position is never re-published every few hundred ms.
-          setSnapshot({ selectedPlayer: apiPlayer.id, currentPlayer: apiPlayer.id, selected: apiPlayer, players: [apiPlayer] });
-          setSnapshotAt(now);
           publishSpotifyPlaybackSnapshot(apiPlayer);
         } else if (!spotifyPlaybackCacheRef.current.player) {
-          setSnapshot({ selectedPlayer: "", currentPlayer: "", selected: null, players: [] });
-          setSnapshotAt(now);
           publishSpotifyPlaybackSnapshot(null);
         }
       } catch {
@@ -2004,8 +2001,13 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     const syncSharedPlayback = (event: Event) => {
       const detail = event instanceof CustomEvent ? event.detail : undefined;
       const player = detail && typeof detail === "object" ? detail as PlayerSnapshot : getSharedSpotifyPlaybackSnapshot();
-      if (!player) return;
       const now = getSharedSpotifyPlaybackTimestamp() || Date.now();
+      if (!player) {
+        spotifyPlaybackCacheRef.current = { at: now, player: null, lastValidAt: spotifyPlaybackCacheRef.current.lastValidAt };
+        setSnapshot({ selectedPlayer: "", currentPlayer: "", selected: null, players: [] });
+        setSnapshotAt(now);
+        return;
+      }
       spotifyPlaybackCacheRef.current = { at: now, player, lastValidAt: now };
       setSnapshot({ selectedPlayer: player.id, currentPlayer: player.id, selected: player, players: [player] });
       setSnapshotAt(now);
@@ -2193,11 +2195,6 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
 
 
   useEffect(() => {
-    const timer = window.setInterval(() => setClock(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     void refreshRateLimitStatus();
     const timer = window.setInterval(() => void refreshRateLimitStatus(), 1000);
     return () => window.clearInterval(timer);
@@ -2205,12 +2202,12 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
 
   useEffect(() => {
     const requestId = ++coverRequestRef.current;
-    if (rateLimitStatus.active || !current?.title) {
+    if (!current?.title) {
       if (!coverClearTimerRef.current) {
         coverClearTimerRef.current = window.setTimeout(() => {
           coverClearTimerRef.current = 0;
           setCoverUrl("");
-        }, 1800);
+        }, 1200);
       }
       return;
     }
@@ -2238,7 +2235,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [current?.artworkUrl, mediaKey, rateLimitStatus.active]);
+  }, [current?.artworkUrl, mediaKey]);
 
   useEffect(() => () => {
     if (coverClearTimerRef.current) window.clearTimeout(coverClearTimerRef.current);
@@ -2250,24 +2247,41 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     const saved = getSavedSourceVolume("spotify", 100);
     volumeValueRef.current = saved;
     setAppVolume(saved);
-    setVolumeReady(true);
+    setVolumeReady(false);
 
-    const apply = async () => {
-      if (cancelled || rateLimitStatus.active) return;
+    const initialize = async () => {
+      if (cancelled) return;
       try {
-        const result = await python.setAppVolume(saved, "spotify");
-        if (!cancelled) setVolumeReady(Boolean(result?.ok));
+        const startedAt = Date.now();
+        const result = await python.getAppVolume("spotify");
+        if (cancelled || volumeInteractionAtRef.current > startedAt) return;
+        if (result?.ok) {
+          const actual = Math.max(0, Math.min(100, Number(result.volume ?? saved)));
+          volumeValueRef.current = actual;
+          setAppVolume(actual);
+          saveSourceVolume("spotify", actual, "observed");
+          setVolumeReady(true);
+          return;
+        }
+      } catch {
+        // The background player may still be creating its Windows audio session.
+      }
+      try {
+        const applied = await python.setAppVolume(volumeValueRef.current, "spotify");
+        if (!cancelled) setVolumeReady(Boolean(applied?.ok && !applied.stale));
       } catch {
         if (!cancelled) setVolumeReady(false);
       }
     };
-    [0, 450, 1200, 2600, 5200].forEach((delay) => timers.push(window.setTimeout(() => void apply(), delay)));
+    [0, 1400, 4200].forEach((delay) => timers.push(window.setTimeout(() => void initialize(), delay)));
 
     const syncVolume = (event: Event) => {
       const detail = event instanceof CustomEvent ? event.detail : null;
       if (detail?.source !== "spotify") return;
       const next = Math.max(0, Math.min(100, Number(detail.volume ?? saved)));
+      if (detail.origin !== "observed") volumeInteractionAtRef.current = Date.now();
       volumeValueRef.current = next;
+      volumeObservedRef.current = { value: next, count: 0 };
       setAppVolume(next);
       setVolumeReady(true);
     };
@@ -2277,7 +2291,59 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
       timers.forEach((timer) => window.clearTimeout(timer));
       window.removeEventListener(SOURCE_VOLUME_CHANGED_EVENT, syncVolume);
     };
-  }, [current?.id, current?.name, rateLimitStatus.active]);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let reading = false;
+    const refreshVolume = async () => {
+      if (reading || volumeCommitInFlightRef.current || volumeTimerRef.current) return;
+      if (Date.now() - volumeInteractionAtRef.current < 800) return;
+      reading = true;
+      const startedAt = Date.now();
+      try {
+        const result = await python.getAppVolume("spotify");
+        if (cancelled || !result?.ok || volumeInteractionAtRef.current > startedAt) return;
+        const next = Math.max(0, Math.min(100, Number(result.volume ?? volumeValueRef.current)));
+        const displayed = volumeValueRef.current;
+        const differs = Math.abs(next - displayed) > 2;
+        if (result.origin !== "spotify-connect" && differs && Date.now() - volumeInteractionAtRef.current < 15000) {
+          if (!volumeCommitInFlightRef.current && !volumeTimerRef.current) {
+            volumeCommitRetryRef.current = 0;
+            volumeTimerRef.current = window.setTimeout(() => {
+              volumeTimerRef.current = 0;
+              flushVolumeCommit();
+            }, 80);
+          }
+          return;
+        }
+        if (differs && result.origin !== "spotify-connect") {
+          const observed = volumeObservedRef.current;
+          volumeObservedRef.current = observed.value === next
+            ? { value: next, count: observed.count + 1 }
+            : { value: next, count: 1 };
+          if (volumeObservedRef.current.count < 2) return;
+        } else {
+          volumeObservedRef.current = { value: next, count: 0 };
+        }
+        volumeValueRef.current = next;
+        setAppVolume(next);
+        setVolumeReady(true);
+        saveSourceVolume("spotify", next, "observed");
+      } catch {
+        if (!cancelled) setVolumeReady(false);
+      } finally {
+        reading = false;
+      }
+    };
+    const initialTimer = window.setTimeout(() => void refreshVolume(), 1600);
+    const timer = window.setInterval(() => void refreshVolume(), 2500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const onFocusIn = (event: FocusEvent) => {
@@ -2359,16 +2425,62 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
 
   function changeVolume(value: number) {
     const next = Math.max(0, Math.min(100, Math.round(Number(value || 0))));
+    volumeInteractionAtRef.current = Date.now();
     volumeValueRef.current = next;
+    volumeObservedRef.current = { value: next, count: 0 };
+    volumeCommitRetryRef.current = 0;
     setAppVolume(next);
     setVolumeReady(true);
     saveSourceVolume("spotify", next);
+    if (volumeCommitInFlightRef.current) {
+      volumeCommitQueuedRef.current = true;
+      return;
+    }
     if (volumeTimerRef.current) window.clearTimeout(volumeTimerRef.current);
     volumeTimerRef.current = window.setTimeout(() => {
-      void python.setAppVolume(volumeValueRef.current, "spotify").then((result) => {
-        if (!result?.ok) setVolumeReady(false);
-      }).catch(() => setVolumeReady(false));
-    }, 80);
+      volumeTimerRef.current = 0;
+      flushVolumeCommit();
+    }, 45);
+  }
+
+  function flushVolumeCommit() {
+    if (volumeCommitInFlightRef.current) {
+      volumeCommitQueuedRef.current = true;
+      return;
+    }
+    const requested = volumeValueRef.current;
+    volumeCommitQueuedRef.current = false;
+    volumeCommitInFlightRef.current = true;
+    void python.setAppVolume(requested, "spotify")
+      .then((result) => {
+        if (!result?.ok) {
+          setVolumeReady(false);
+          return;
+        }
+        if (result.stale) return;
+        setVolumeReady(true);
+        if (volumeValueRef.current !== requested) return;
+        const confirmed = Math.max(0, Math.min(100, Number(result.volume ?? requested)));
+        if (Math.abs(confirmed - requested) <= 2) {
+          volumeCommitRetryRef.current = 0;
+          volumeValueRef.current = confirmed;
+          setAppVolume(confirmed);
+        } else if (volumeCommitRetryRef.current < 3) {
+          volumeCommitRetryRef.current += 1;
+          volumeCommitQueuedRef.current = true;
+        }
+      })
+      .catch(() => setVolumeReady(false))
+      .finally(() => {
+        volumeCommitInFlightRef.current = false;
+        if (volumeCommitQueuedRef.current || volumeValueRef.current !== requested) {
+          volumeCommitQueuedRef.current = false;
+          volumeTimerRef.current = window.setTimeout(() => {
+            volumeTimerRef.current = 0;
+            flushVolumeCommit();
+          }, 80);
+        }
+      });
   }
 
   function nudgeVolume(delta: number) {
@@ -2505,7 +2617,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
               <div style={{ height: "5px", borderRadius: "999px", background: "rgba(255,255,255,0.16)", overflow: "hidden" }}>
                 <SmoothProgressFill position={basePositionMs} duration={durationMs} playing={isPlaying} sampledAt={snapshotAt} style={{ height: "100%", background: "#fff", borderRadius: "999px" }} />
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "13px", opacity: 0.48, fontVariantNumeric: "tabular-nums" }}><span>{formatTrackDuration(progressMs)}</span><span>{formatTrackDuration(durationMs)}</span></div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "13px", opacity: 0.48, fontVariantNumeric: "tabular-nums" }}><SmoothProgressTime position={basePositionMs} duration={durationMs} playing={isPlaying} sampledAt={snapshotAt} format={formatTrackDuration} /><span>{formatTrackDuration(durationMs)}</span></div>
             </div> : null}
           </> : <h1 style={{ margin: 0, fontSize: "clamp(34px, 3.4vw, 58px)", lineHeight: 1.08, letterSpacing: "-0.04em", fontWeight: 610 }}>{t.noPlayback}</h1>}
         </div>

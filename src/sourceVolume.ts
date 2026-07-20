@@ -25,7 +25,7 @@ export function getSavedSourceVolume(source: string, fallback = 100): number {
   return Object.prototype.hasOwnProperty.call(values, key) ? clampVolume(values[key], fallback) : clampVolume(fallback);
 }
 
-export function saveSourceVolume(source: string, value: number): number {
+export function saveSourceVolume(source: string, value: number, origin: "plugin" | "observed" = "plugin"): number {
   const key = String(source || "").trim();
   const volume = clampVolume(value);
   if (!key || typeof window === "undefined") return volume;
@@ -33,7 +33,7 @@ export function saveSourceVolume(source: string, value: number): number {
     const values = readAll();
     values[key] = volume;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(values));
-    window.dispatchEvent(new CustomEvent(SOURCE_VOLUME_CHANGED_EVENT, { detail: { source: key, volume } }));
+    window.dispatchEvent(new CustomEvent(SOURCE_VOLUME_CHANGED_EVENT, { detail: { source: key, volume, origin } }));
   } catch {
     // Embedded CEF can temporarily deny storage; live volume still applies.
   }

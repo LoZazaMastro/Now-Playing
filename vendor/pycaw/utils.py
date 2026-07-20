@@ -1,7 +1,10 @@
 import warnings
 
 import comtypes
-import psutil
+try:
+    import psutil
+except Exception:
+    psutil = None
 from _ctypes import COMError
 
 from pycaw.api.audioclient import IChannelAudioVolume, ISimpleAudioVolume
@@ -87,6 +90,8 @@ class AudioSession:
 
     @property
     def Process(self):
+        if psutil is None:
+            return None
         if self._process is None and self.ProcessId != 0:
             try:
                 self._process = psutil.Process(self.ProcessId)
