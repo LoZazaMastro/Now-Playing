@@ -17,7 +17,7 @@ from ..utils import (
 
 class ShahidBaseIE(AWSIE):
     _AWS_PROXY_HOST = 'api2.shahid.net'
-    _AWS_API_KEY = '2RRtuMHx95aNI1Kvtn2rChEuwsCogUd4samGPjLh'
+    _AWS_API_KEY = ''  # neutralised: vendored Shahid extractor is unused (GitHub secret scanning)
     _VALID_URL_BASE = r'https?://shahid\.mbc\.net/[a-z]{2}/'
 
     def _handle_error(self, e):
@@ -36,8 +36,8 @@ class ShahidBaseIE(AWSIE):
         try:
             return self._aws_execute_api({
                 'uri': '/proxy/v2/' + path,
-                'access_key': 'AKIAI6X4TYCIXM2B7MUQ',
-                'secret_key': '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',
+                'access_key': '',
+                'secret_key': '',
             }, video_id, query)
         except ExtractorError as e:
             if isinstance(e.cause, HTTPError):
