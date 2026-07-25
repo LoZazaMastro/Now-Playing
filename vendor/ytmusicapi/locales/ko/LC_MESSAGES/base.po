@@ -1,0 +1,110 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "앨범"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "아티스트"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr "재생목록"
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "노래"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr "동영상"
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "스테이션"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "프로필"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr "팟캐스트"
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "에피소드"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "싱글"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "ep"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "연주"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "작곡"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "프로듀싱"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "음악 메타데이터 제공"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr "앨범"
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "싱글 및 ep"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "오디오북 및 프로그램"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "동영상"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr "재싱목록"
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "fans might also like"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "최신 에피소드"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr "팟캐스트"

@@ -9,7 +9,7 @@
       "media",
       "windows"
     ],
-    "description": "A console-style Windows music companion with SMTC controls, fullscreen visuals, optional personal Spotify browsing and a built-in local music library/player.",
+    "description": "A console-style Windows music companion with Spotify, YouTube Music, local playback, SMTC controls and fullscreen visuals.",
     "image": ""
   }
 }

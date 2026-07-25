@@ -18,7 +18,6 @@ import {
   FaPause,
   FaPlay,
   FaRandom,
-  FaRedoAlt,
   FaSearch,
   FaStepBackward,
   FaStepForward,
@@ -26,6 +25,7 @@ import {
   FaTimes,
   FaUser,
 } from "react-icons/fa";
+import { RepeatIcon } from "./repeatIcon";
 import * as python from "./python";
 import { localAudioPlayer, useLocalAudioState } from "./localAudio";
 import { ArtistBackgroundPicker } from "./artistBackground";
@@ -260,6 +260,9 @@ function LocalMusicPickerModal({ initialPath, closeModal, onAdd }: {
   return (
     <ModalRoot closeModal={closeModal} onCancel={closeModal} onEscKeypress={closeModal}>
       <style>{`
+        html:has(.npLocalPicker) [class*="ModalPosition"],
+        html:has(.npLocalPicker) [class*="ModalDialog"],
+        html:has(.npLocalPicker) [class*="ModalOverlay"]{z-index:2147483647!important}
         .npLocalPicker button{text-align:left!important}
         .npLocalPicker button>span{justify-content:flex-start!important}
         .npLocalPicker button.npLocalPickerBack>span{width:100%!important;height:100%!important;padding:0!important;display:flex!important;align-items:center!important;justify-content:center!important}
@@ -269,11 +272,11 @@ function LocalMusicPickerModal({ initialPath, closeModal, onAdd }: {
         .npLocalPicker button.npLocalPickerConfirm{color:#fff!important;background:linear-gradient(135deg,rgba(217,163,55,.96),rgba(179,124,22,.96))!important;border:1px solid rgba(255,226,159,.42)!important;box-shadow:0 8px 24px rgba(128,82,7,.24)!important}
         .npLocalPicker button.npLocalPickerConfirm:hover,.npLocalPicker button.npLocalPickerConfirm:focus,.npLocalPicker button.npLocalPickerConfirm.gpfocus{background:linear-gradient(135deg,#e1ad43,#c18a24)!important;border-color:rgba(255,244,211,.78)!important;box-shadow:0 0 0 2px rgba(255,255,255,.72),0 0 24px rgba(217,163,55,.38)!important}
       `}</style>
-      <Focusable className="npLocalPicker" flow-children="vertical" style={{ position: "fixed", left: "50%", top: "50%", transform: "translate(-50%,-50%)", zIndex: 10000, width: "min(46rem, calc(100vw - 72px))", height: "min(42rem, calc(100vh - 72px))", maxWidth: "100%", display: "grid", gridTemplateRows: "auto auto auto minmax(0,1fr)", gap: 10, padding: 18, borderRadius: 8, border: "1px solid rgba(255,255,255,.16)", background: "rgba(16,17,18,.98)", boxShadow: "0 28px 90px rgba(0,0,0,.72)", overflow: "hidden", boxSizing: "border-box" }}>
+      <Focusable className="npLocalPicker" flow-children="vertical" style={{ position: "fixed", left: "50%", top: "50%", transform: "translate(-50%,-50%)", zIndex: 2147483647, width: "min(46rem, calc(100vw - 72px))", height: "min(42rem, calc(100vh - 72px))", maxWidth: "100%", display: "grid", gridTemplateRows: "auto auto auto minmax(0,1fr)", gap: 10, padding: 18, borderRadius: 8, border: "1px solid rgba(255,255,255,.16)", background: "rgba(16,17,18,.98)", boxShadow: "0 28px 90px rgba(0,0,0,.72)", overflow: "hidden", boxSizing: "border-box" }}>
         <div style={{ fontSize: "1.25rem", fontWeight: 700, marginBottom: 12 }}>{t.pickerTitle}</div>
         <Focusable flow-children="horizontal" style={{ display: "grid", gridTemplateColumns: "auto minmax(0,1fr) auto", gap: 8 }}>
           <DialogButton className="npLocalPickerBack" style={{ width: 46, minWidth: 46, padding: 0, display: "flex", alignItems: "center", justifyContent: "center" }} disabled={loading || adding} onClick={() => void load(parentWindowsPath(listing.path))}><span><FaArrowLeft /></span></DialogButton>
-          <TextField value={manualPath} onChange={(event) => setManualPath(event.target.value)} style={{ width: "100%" }} />
+          <TextField value={manualPath} onChange={(value: any) => setManualPath(typeof value === "string" ? value : String(value?.target?.value ?? ""))} style={{ width: "100%" }} />
           <DialogButton className="npLocalPickerGo" style={{ width: 84, minWidth: 84, maxWidth: 84, padding: 0 }} disabled={loading || adding} onClick={() => void load(manualPath)}><span className="npLocalPickerGoLabel">{t.openPath}</span></DialogButton>
         </Focusable>
         <DialogButton className="npLocalPickerConfirm" style={{ width: "100%", marginTop: 10 }} disabled={loading || adding} onClick={() => void add("folder", listing.path)}>
@@ -896,9 +899,9 @@ function LocalCardImage({ item, round = false }: { item: any; round?: boolean })
   return url ? <img loading="lazy" src={url} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: round ? "50%" : 0 }} /> : <FaMusic size={44} style={{ opacity: .36 }} />;
 }
 
-function TvTrack({ track, index, onActivate, showArtwork = true }: { track: any; index: number; onActivate: () => void; showArtwork?: boolean }) {
+function TvTrack({ track, index, onActivate, showArtwork = true, onFocus }: { track: any; index: number; onActivate: () => void; showArtwork?: boolean; onFocus?: () => void }) {
   return (
-    <DialogButton className="npLocalTvTrack" onClick={onActivate} style={{ width: "100%", minWidth: "100%", height: 66, minHeight: 66, padding: "0 16px", borderRadius: 10, marginBottom: 6, textAlign: "left" }}>
+    <DialogButton className="npLocalTvTrack" {...({ onFocus: (event: any) => { event?.currentTarget?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "smooth" }); onFocus?.(); } } as any)} onClick={onActivate} style={{ width: "100%", minWidth: "100%", height: 66, minHeight: 66, padding: "0 16px", borderRadius: 10, marginBottom: 6, textAlign: "left" }}>
       <span style={{ display: "grid", gridTemplateColumns: showArtwork ? "32px 48px minmax(0,1fr) auto" : "32px minmax(0,1fr) auto", alignItems: "center", gap: showArtwork ? 13 : 16, width: "100%" }}>
         <span style={{ opacity: .45, fontVariantNumeric: "tabular-nums", textAlign: "right" }}>{index + 1}</span>
         {showArtwork ? <LocalArtwork item={track} size={44} /> : null}
@@ -925,10 +928,13 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
   const state = useLocalAudioState();
   const [volume, setVolume] = useState(() => state.volume);
   const [loading, setLoading] = useState(false);
+  const [libraryTrackVisibleCount, setLibraryTrackVisibleCount] = useState(120);
+  const [detailTrackVisibleCount, setDetailTrackVisibleCount] = useState(120);
   const volumeRef = useRef(100);
   const volumeTimer = useRef<number>(0);
   const volumeInteractionAtRef = useRef(0);
   const playerCoverRef = useRef<any>(null);
+  const homeTabRef = useRef<any>(null);
   const rootDetailFocusKeyRef = useRef("");
   const restoringTabRef = useRef<BrowserTab | null>(null);
   const restoringTabUntilRef = useRef(0);
@@ -936,8 +942,23 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
   const [restoreFocusKey, setRestoreFocusKey] = useState("");
   const [backgroundSettingsOpen, setBackgroundSettingsOpen] = useState(false);
 
+  useEffect(() => {
+    setLibraryTrackVisibleCount(120);
+  }, [section, library]);
+
   const loadHome = useCallback(async () => setHome(await python.getLocalMusicHome()), []);
   const loadLibrary = useCallback(async (next: LibrarySection) => { setSection(next); setLibrary(await python.getLocalMusicLibrary(next, 0, 100000)); }, []);
+
+  // Focus the Home tab on entry so the user never lands on hidden elements.
+  useEffect(() => {
+    let tries = 0;
+    const focusHome = () => {
+      const element = homeTabRef.current as HTMLElement | null;
+      if (element && typeof element.focus === "function") { try { element.focus(); return; } catch { /* retry */ } }
+      if (tries++ < 20) window.requestAnimationFrame(focusHome);
+    };
+    focusHome();
+  }, []);
 
   const clearRestoreFocusTimers = useCallback(() => {
     restoreFocusTimersRef.current.forEach((timer) => window.clearTimeout(timer));
@@ -974,6 +995,7 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
 
 
   const loadBigPictureDetail = useCallback(async (next: Detail) => {
+    setDetailTrackVisibleCount(120);
     const data = await python.getLocalMusicDetail(next.kind, next.id);
     setDetailData(data);
     if (next.kind === "artist") {
@@ -1155,7 +1177,7 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
 
             <Focusable flow-children="horizontal" style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10 }}>
             <DialogButton disabled={!hasCurrent} aria-label={t.shuffle} onClick={() => void localAudioPlayer.command("shuffle")} style={{ position: "relative", width: "100%", minWidth: 0, height: 46, padding: 0, opacity: state.shuffleActive ? 1 : .62 }}><FaRandom size={16} />{state.shuffleActive ? <span aria-hidden="true" style={{ position: "absolute", top: 7, right: 8, width: 6, height: 6, borderRadius: 999, background: LOCAL_ACCENT, boxShadow: `0 0 8px ${LOCAL_ACCENT}` }} /> : null}</DialogButton>
-            <DialogButton disabled={!hasCurrent} aria-label={t.repeat} onClick={() => void localAudioPlayer.command("repeat")} style={{ position: "relative", width: "100%", minWidth: 0, height: 46, padding: 0, opacity: state.repeatMode !== "None" ? 1 : .62 }}><FaRedoAlt size={16} />{state.repeatMode !== "None" ? <span aria-hidden="true" style={{ position: "absolute", top: 7, right: 8, width: 6, height: 6, borderRadius: 999, background: LOCAL_ACCENT, boxShadow: `0 0 8px ${LOCAL_ACCENT}` }} /> : null}</DialogButton>
+            <DialogButton disabled={!hasCurrent} aria-label={t.repeat} onClick={() => void localAudioPlayer.command("repeat")} style={{ position: "relative", width: "100%", minWidth: 0, height: 46, padding: 0, opacity: state.repeatMode !== "None" ? 1 : .62 }}><RepeatIcon one={state.repeatMode === "One"} size={17} />{state.repeatMode !== "None" ? <span aria-hidden="true" style={{ position: "absolute", top: 7, right: 8, width: 6, height: 6, borderRadius: 999, background: LOCAL_ACCENT, boxShadow: `0 0 8px ${LOCAL_ACCENT}` }} /> : null}</DialogButton>
             </Focusable>
 
             <DialogButton className="npLocalMinimalButton" aria-label={t.fullscreen} onClick={onOpenVisualizer} style={{ width: "100%", minWidth: 0, height: 46, minHeight: 46, border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.025)" }}><span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: ".82em", fontWeight: 430 }}><FaExpandArrowsAlt size={13} /> {t.fullscreen}</span></DialogButton>
@@ -1208,7 +1230,7 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
   function renderLibrary() {
     const labels: Record<LibrarySection, string> = { tracks: t.tracks, albums: t.albums, artists: t.artists };
     const items = library.items ?? [];
-    const visibleItems = items;
+    const visibleItems = section === "tracks" ? items.slice(0, libraryTrackVisibleCount) : items;
     return <>
       <Focusable flow-children="horizontal" style={{ display: "flex", gap: 9 }}>
         {(Object.keys(labels) as LibrarySection[]).map((key) => <DialogButton key={key} style={{ width: 180, minWidth: 180, height: 46, borderRadius: 999, opacity: section === key ? 1 : .58 }} onClick={() => void loadLibrary(key)}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>{key === "tracks" ? <FaMusic /> : key === "albums" ? <FaCompactDisc /> : <FaUser />}{labels[key]}</span></DialogButton>)}
@@ -1216,8 +1238,8 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
       <h2 style={{ marginTop: 26 }}>{labels[section]}</h2>
       {section === "tracks" ? <>{items.length ? <Focusable flow-children="horizontal" style={{ display: "flex", gap: 10, marginBottom: 14 }}>
         <DialogButton style={{ width: 190, minWidth: 190, height: 46 }} onClick={() => void playTracks(items, 0)}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><FaPlay /> {t.play}</span></DialogButton>
-        <DialogButton style={{ width: 190, minWidth: 190, height: 46 }} onClick={() => { const shuffled = [...items].sort(() => Math.random() - .5); void playTracks(shuffled, 0); }}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><FaRandom /> {t.shuffle}</span></DialogButton>
-      </Focusable> : null}{visibleItems.map((track: any, index: number) => <TvTrack key={track.id} track={track} index={index} onActivate={() => void playTracks(items, index)} />)}</> : <Focusable {...({ "data-np-six-grid": section } as any)} flow-children="grid" navEntryPreferPosition={restoreFocusKey ? NavEntryPositionPreferences.PREFERRED_CHILD : NavEntryPositionPreferences.MAINTAIN_X} onKeyDownCapture={(event: any) => moveSixColumnGridFocus(event, gridDirectionFromKey(event?.key))} onGamepadDirection={(event: any) => moveSixColumnGridFocus(event, gridDirectionFromGamepad(event?.detail?.button))} style={{ display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: 14 }}>{visibleItems.map((item: any, index: number) => { const focusKey = `library:${section}:${itemType(item)}:${String(item?.id ?? index)}`; return <TvCard key={item.id} item={item} round={section === "artists"} gridIndex={index} focusKey={focusKey} preferredFocus={restoreFocusKey === focusKey} onActivate={() => void openDetail(item, focusKey)} />; })}</Focusable>}
+        <DialogButton style={{ width: 190, minWidth: 190, height: 46 }} onClick={() => { const shuffled = [...items]; for (let index = shuffled.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [shuffled[index], shuffled[swap]] = [shuffled[swap], shuffled[index]]; } void playTracks(shuffled, 0); }}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><FaRandom /> {t.shuffle}</span></DialogButton>
+      </Focusable> : null}{visibleItems.map((track: any, index: number) => <TvTrack key={track.id} track={track} index={index} onFocus={() => { if (index >= visibleItems.length - 18 && visibleItems.length < items.length) setLibraryTrackVisibleCount((current) => Math.min(items.length, current + 120)); }} onActivate={() => void playTracks(items, index)} />)}</> : <Focusable {...({ "data-np-six-grid": section } as any)} flow-children="grid" navEntryPreferPosition={restoreFocusKey ? NavEntryPositionPreferences.PREFERRED_CHILD : NavEntryPositionPreferences.MAINTAIN_X} onKeyDownCapture={(event: any) => moveSixColumnGridFocus(event, gridDirectionFromKey(event?.key))} onGamepadDirection={(event: any) => moveSixColumnGridFocus(event, gridDirectionFromGamepad(event?.detail?.button))} style={{ display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: 14 }}>{visibleItems.map((item: any, index: number) => { const focusKey = `library:${section}:${itemType(item)}:${String(item?.id ?? index)}`; return <TvCard key={item.id} item={item} round={section === "artists"} gridIndex={index} focusKey={focusKey} preferredFocus={restoreFocusKey === focusKey} onActivate={() => void openDetail(item, focusKey)} />; })}</Focusable>}
       {!items.length && !loading ? <div style={{ opacity: .56 }}>{t.nothingHere}</div> : null}
     </>;
   }
@@ -1248,7 +1270,7 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
         <div style={{ minWidth: 0 }}><h1 style={{ fontSize: isArtist ? "clamp(62px,7vw,104px)" : 54, lineHeight: 1, margin: 0, letterSpacing: "-.045em" }}>{item?.name}</h1>{!isArtist ? <div style={{ marginTop: 12, opacity: .62 }}>{artistText(item)}{item?.year ? ` · ${item.year}` : ""}</div> : null}<Focusable flow-children="horizontal" style={{ display: "flex", gap: 10, marginTop: 20 }}><DialogButton style={{ width: 170, minWidth: 170, height: 48 }} onClick={() => void playTracks(tracks, 0)}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><FaPlay /> {t.play}</span></DialogButton>{!isArtist && albumArtist?.id ? <DialogButton style={{ width: 160, minWidth: 160, height: 48 }} onClick={() => void openDetail({ ...albumArtist, type: "artist" })}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><FaUser /> {t.artist}</span></DialogButton> : null}</Focusable></div>
       </div>
       {isArtist && albums.length ? cardRow(t.albums, albums) : null}
-      <section style={{ marginTop: 30 }}><h2>{t.tracks}</h2>{tracks.map((track: any, index: number) => <TvTrack key={track.id} track={track} index={index} showArtwork={!isArtist} onActivate={() => void playTracks(tracks, index)} />)}</section>
+      <section style={{ marginTop: 30 }}><h2>{t.tracks}</h2>{tracks.slice(0, detailTrackVisibleCount).map((track: any, index: number) => <TvTrack key={track.id} track={track} index={index} showArtwork={!isArtist} onFocus={() => { const visible = Math.min(tracks.length, detailTrackVisibleCount); if (index >= visible - 18 && visible < tracks.length) setDetailTrackVisibleCount((current) => Math.min(tracks.length, current + 120)); }} onActivate={() => void playTracks(tracks, index)} />)}</section>
       {isArtist ? <DialogButton className="npLocalMinimalButton" style={{ width: 250, minWidth: 250, height: 48, marginTop: 26 }} onClick={() => setBackgroundSettingsOpen(true)}><span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><FaCog /> {coreT.artistBackgroundSettings}</span></DialogButton> : null}
     </>;
   }
@@ -1345,9 +1367,9 @@ export function LocalMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings 
       {backgroundCover ? <div aria-hidden="true" style={{ position: "absolute", inset: "-28%", background: `url(${backgroundCover}) center/cover`, filter: "blur(130px) saturate(1.42)", opacity: detail?.kind === "album" ? .46 : .34, zIndex: 0 }} /> : null}
       <div aria-hidden="true" style={{ position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none", background: detail?.kind === "artist" ? "#000" : "linear-gradient(180deg,rgba(9,8,6,.30),#090806 86%)" }} />
       {detail ? <main className="npLocalTvScroll" style={{ position: "absolute", inset: 0, overflowY: "auto", overflowX: "hidden", padding: "18px 56px 300px", scrollPaddingBottom: 250, zIndex: 2 }}><div style={{ position: "relative", zIndex: 1 }}>{renderDetail()}</div></main> : <>
-        <Focusable className="npLocalCustomTabs" flow-children="horizontal" style={{ position: "absolute", top: 24, left: 56, zIndex: 200, display: "flex", alignItems: "center", gap: 8 }}>
+        <Focusable className="npLocalCustomTabs" flow-children="horizontal" onButtonDown={(event: any) => { if (event?.detail?.button === GamepadButton.DIR_UP) { event?.preventDefault?.(); event?.stopPropagation?.(); } }} style={{ position: "absolute", top: 24, left: 56, zIndex: 200, display: "flex", alignItems: "center", gap: 8 }}>
           {([["home", t.home, FaHome], ["search", t.search, FaSearch], ["library", t.library, FaList], ["settings", t.settings, FaCog]] as const).map(([id, label, Icon]) => (
-            <DialogButton key={id} className={`npLocalCustomTab${id !== "settings" && tab === id ? " npLocalCustomTabActive" : ""}`} onClick={() => id === "settings" ? onOpenSettings() : switchRootTab(id)} style={{ width: 138, minWidth: 138, height: 38, minHeight: 38, padding: 0 }}>
+            <DialogButton key={id} ref={id === "home" ? homeTabRef : undefined} className={`npLocalCustomTab${id !== "settings" && tab === id ? " npLocalCustomTabActive" : ""}`} onClick={() => id === "settings" ? onOpenSettings() : switchRootTab(id)} style={{ width: 138, minWidth: 138, height: 38, minHeight: 38, padding: 0 }}>
               <span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: ".76em", fontWeight: 540 }}><Icon size={13} /> {label}</span>
             </DialogButton>
           ))}

@@ -19,6 +19,13 @@ export type LocalAudioState = {
   error: string;
 };
 
+export type LocalAudioLevels = {
+  energy: number;
+  bass: number;
+  mid: number;
+  treble: number;
+};
+
 const emptyState: LocalAudioState = {
   track: null,
   queue: [],
@@ -54,6 +61,11 @@ class LocalAudioEngine {
   private recoveryInFlight = false;
   private lastProgressAt = 0;
   private stallRecoveryTimer = 0;
+  private audioContext: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private frequencyData: Uint8Array<ArrayBuffer> | null = null;
+  private lastContextResumeAt = 0;
+  private prefetchedVideoIds = new Set<string>();
 
   constructor() {
     if (typeof window === "undefined") return;
@@ -88,6 +100,7 @@ class LocalAudioEngine {
   private ensureAudio() {
     if (this.audio || typeof Audio === "undefined") return this.audio;
     const audio = new Audio();
+    audio.crossOrigin = "anonymous";
     audio.preload = "auto";
     audio.volume = Math.max(0, Math.min(1, this.state.volume / 100));
     audio.addEventListener("timeupdate", () => {
@@ -105,9 +118,21 @@ class LocalAudioEngine {
       this.patch({ length: duration || Number(this.state.track?.duration_ms || 0), error: "" });
     });
     audio.addEventListener("play", () => {
+      // `play` fires the instant play() is called, before the stream has buffered.
+      // Do not flip to "Playing" here or the smooth progress bar starts ticking
+      // from 0 while the audio is still resolving, then snaps back when the real
+      // audio finally starts. Wait for the `playing` event (actual audio start).
+      this.ensureAudioAnalysis();
+      void this.audioContext?.resume().catch(() => {});
+      this.patch({ error: "" });
+    });
+    audio.addEventListener("playing", () => {
+      this.ensureAudioAnalysis();
+      void this.audioContext?.resume().catch(() => {});
       this.lastProgressAt = Date.now();
-      this.patch({ status: "Playing", error: "" });
+      this.patch({ status: "Playing", position: Math.max(0, Math.floor((audio.currentTime || 0) * 1000)), error: "" });
       this.scheduleStallRecovery("progress-timeout");
+      this.prefetchNext();
     });
     audio.addEventListener("pause", () => {
       this.clearStallRecoveryTimer();
@@ -131,6 +156,153 @@ class LocalAudioEngine {
     return audio;
   }
 
+  // 8 output channels, WebAudio discrete order: FL, FR, FC, LFE, SL, SR, BL, BR.
+  static readonly SPEAKER_COUNT = 8;
+  private surroundMode: "off" | "5.1" | "7.1" = (() => {
+    try {
+      const stored = String(window.localStorage.getItem("nowPlaying.surroundMode") || "");
+      if (stored === "5.1" || stored === "7.1" || stored === "off") return stored;
+      if (window.localStorage.getItem("nowPlaying.upmix71") === "1") return "7.1";
+    } catch { /* fall through */ }
+    return "off";
+  })();
+  private speakerVolumes: number[] = (() => {
+    try {
+      const raw = JSON.parse(String(window.localStorage.getItem("nowPlaying.speakerVolumes") || "[]"));
+      if (Array.isArray(raw)) return Array.from({ length: 8 }, (_, i) => Math.max(0, Math.min(100, Number(raw[i] ?? 100))));
+    } catch { /* fall through */ }
+    return Array.from({ length: 8 }, () => 100);
+  })();
+  private upmixNodes: AudioNode[] = [];
+  private channelContribs: { node: GainNode; base: number; channel: number }[] = [];
+
+  // Route the analyser output either straight to a stereo destination, or through
+  // a stereo→7.1 upmix matrix when the option is on and the output device
+  // actually supports multichannel. Each output channel has an adjustable volume.
+  // Used by Your Music and YouTube Music (both play through this in-browser
+  // player); Spotify plays through its own bridge and is unaffected.
+  private applyOutputRouting() {
+    const context = this.audioContext;
+    const analyser = this.analyser;
+    if (!context || !analyser) return;
+    try { analyser.disconnect(); } catch { /* was not connected yet */ }
+    for (const node of this.upmixNodes) { try { node.disconnect(); } catch { /* ignore */ } }
+    this.upmixNodes = [];
+    this.channelContribs = [];
+    const destination = context.destination;
+    const maxChannels = Number(destination.maxChannelCount || 2);
+    if (this.surroundMode !== "off" && maxChannels >= 6) {
+      const channels = this.surroundMode === "7.1" ? Math.min(8, maxChannels) : Math.min(6, maxChannels);
+      try {
+        destination.channelCount = channels;
+        destination.channelCountMode = "explicit";
+        destination.channelInterpretation = "discrete";
+      } catch { /* device may reject an explicit layout */ }
+      const splitter = context.createChannelSplitter(2);
+      const merger = context.createChannelMerger(channels);
+      analyser.connect(splitter);
+      const route = (input: number, output: number, base: number) => {
+        const gain = context.createGain();
+        gain.gain.value = base * (Math.max(0, Math.min(100, this.speakerVolumes[output] ?? 100)) / 100);
+        splitter.connect(gain, input, 0);
+        gain.connect(merger, 0, output);
+        this.upmixNodes.push(gain);
+        this.channelContribs.push({ node: gain, base, channel: output });
+      };
+      route(0, 0, 1);                       // Front Left  = L
+      route(1, 1, 1);                       // Front Right = R
+      route(0, 2, 0.5); route(1, 2, 0.5);   // Center = (L+R)/2
+      route(0, 3, 0.35); route(1, 3, 0.35); // LFE   = (L+R) attenuated
+      if (channels >= 6) { route(0, 4, 0.9); route(1, 5, 0.9); }   // Side L/R
+      if (channels >= 8) { route(0, 6, 0.75); route(1, 7, 0.75); } // Back L/R
+      merger.connect(destination);
+      this.upmixNodes.push(splitter, merger);
+    } else {
+      try { destination.channelCount = Math.min(2, maxChannels); } catch { /* ignore */ }
+      analyser.connect(destination);
+    }
+  }
+
+  setSurroundMode(mode: "off" | "5.1" | "7.1") {
+    this.surroundMode = mode === "5.1" || mode === "7.1" ? mode : "off";
+    try { window.localStorage.setItem("nowPlaying.surroundMode", this.surroundMode); } catch { /* storage unavailable */ }
+    this.applyOutputRouting();
+  }
+
+  getSurroundMode(): "off" | "5.1" | "7.1" {
+    return this.surroundMode;
+  }
+
+  getSpeakerVolumes(): number[] {
+    return [...this.speakerVolumes];
+  }
+
+  setSpeakerVolume(channel: number, value: number) {
+    if (channel < 0 || channel >= LocalAudioEngine.SPEAKER_COUNT) return;
+    const volume = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+    this.speakerVolumes[channel] = volume;
+    try { window.localStorage.setItem("nowPlaying.speakerVolumes", JSON.stringify(this.speakerVolumes)); } catch { /* storage unavailable */ }
+    // Update the live gain nodes for this channel without rebuilding the graph.
+    for (const contrib of this.channelContribs) {
+      if (contrib.channel === channel) contrib.node.gain.value = contrib.base * (volume / 100);
+    }
+  }
+
+  private ensureAudioAnalysis() {
+    if (this.analyser || !this.audio || typeof window === "undefined") return;
+    const AudioContextConstructor = window.AudioContext;
+    if (!AudioContextConstructor) return;
+    try {
+      const context = new AudioContextConstructor();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = .78;
+      const source = context.createMediaElementSource(this.audio);
+      source.connect(analyser);
+      this.audioContext = context;
+      this.analyser = analyser;
+      this.frequencyData = new Uint8Array(analyser.frequencyBinCount);
+      this.applyOutputRouting();
+    } catch {
+      this.audioContext = null;
+      this.analyser = null;
+      this.frequencyData = null;
+    }
+  }
+
+  getAudioLevels(): LocalAudioLevels {
+    if (!this.analyser && this.audio && this.state.status === "Playing") {
+      // The play-time hookup can fail transiently in restricted CEF contexts;
+      // retry lazily while a visualizer is actually reading levels.
+      this.ensureAudioAnalysis();
+    }
+    if (this.audioContext && this.audioContext.state === "suspended" && Date.now() - this.lastContextResumeAt > 1500) {
+      this.lastContextResumeAt = Date.now();
+      void this.audioContext.resume().catch(() => {});
+    }
+    const analyser = this.analyser;
+    const data = this.frequencyData;
+    if (!analyser || !data || this.state.status !== "Playing") {
+      return { energy: 0, bass: 0, mid: 0, treble: 0 };
+    }
+    analyser.getByteFrequencyData(data);
+    const average = (from: number, to: number) => {
+      let total = 0;
+      const end = Math.max(from + 1, Math.min(data.length, to));
+      for (let index = from; index < end; index += 1) total += data[index];
+      return total / (end - from) / 255;
+    };
+    const bass = average(0, Math.ceil(data.length * .12));
+    const mid = average(Math.ceil(data.length * .12), Math.ceil(data.length * .45));
+    const treble = average(Math.ceil(data.length * .45), data.length);
+    return {
+      bass,
+      mid,
+      treble,
+      energy: Math.min(1, bass * .48 + mid * .36 + treble * .16),
+    };
+  }
+
   restoreLastTrack(): Promise<LocalAudioState> {
     // Kept as a compatibility no-op for callers compiled against older builds.
     // Playback state now comes only from this live singleton.
@@ -150,9 +322,57 @@ class LocalAudioEngine {
     return this.streamBasePromise;
   }
 
-  private streamUrl(track: any) {
+  private async streamUrl(track: any) {
+    if (String(track?.sourceKey ?? "") === "youtubeMusic") {
+      const result = await python.youtubeMusicPrepareStream(String(track?.videoId ?? track?.id ?? ""));
+      if (!result?.ok || !result.data?.url) {
+        throw new Error(String(result?.error ?? "YouTube Music stream is unavailable"));
+      }
+      // Replace the small search thumbnail with yt-dlp's full-resolution square
+      // cover so the fullscreen and top-bar artwork for the playing track is crisp.
+      const thumbnail = String((result.data as any)?.thumbnail ?? "").trim();
+      if (thumbnail && track && typeof track === "object") {
+        const highRes = { url: thumbnail, width: 1200, height: 1200 };
+        track.images = [...(Array.isArray(track.images) ? track.images : []), highRes];
+        if (track.album && typeof track.album === "object") {
+          track.album.images = [...(Array.isArray(track.album.images) ? track.album.images : []), highRes];
+        }
+        this.emit(false);
+      }
+      return String(result.data.url);
+    }
+
     const id = encodeURIComponent(String(track?.id ?? ""));
     return `${this.streamBase}/track/${id}`;
+  }
+
+  // Warm the backend stream cache for the next queued YouTube Music track while
+  // the current one plays, so skipping/advancing resolves instantly instead of
+  // waiting ~1-2 s for yt-dlp. Best-effort and de-duplicated per next track.
+  private prefetchNext() {
+    try {
+      const queue = this.state.queue;
+      if (!queue || !queue.length) return;
+      // Warm a few upcoming tracks on the backend's dedicated single-worker
+      // prefetch executor. That executor never shares threads with on-demand
+      // playback resolution, so prefetch can no longer slow down selecting or
+      // advancing a track (the problem the 6-at-once version caused). Requests are
+      // de-duplicated so each track is only prepared once.
+      const AHEAD = 4;
+      for (let offset = 1; offset <= AHEAD; offset += 1) {
+        const track = queue[this.state.index + offset];
+        if (!track || String((track as any)?.sourceKey ?? "") !== "youtubeMusic") continue;
+        const videoId = String((track as any)?.videoId ?? (track as any)?.id ?? "");
+        if (!videoId || this.prefetchedVideoIds.has(videoId)) continue;
+        this.prefetchedVideoIds.add(videoId);
+        void python.youtubeMusicPrefetchStream(videoId).catch(() => { this.prefetchedVideoIds.delete(videoId); });
+      }
+      if (this.prefetchedVideoIds.size > 60) {
+        this.prefetchedVideoIds = new Set(Array.from(this.prefetchedVideoIds).slice(-30));
+      }
+    } catch {
+      // Prefetch is purely an optimisation; ignore any failure.
+    }
   }
 
   private emit(syncBackend = true) {
@@ -178,6 +398,7 @@ class LocalAudioEngine {
         repeatMode: state.repeatMode,
         canPrevious: state.canPrevious,
         canNext: state.canNext,
+        sourceKey: String(state.track?.sourceKey ?? "localMusic"),
       }).catch(() => {});
     }, delay);
   }
@@ -205,15 +426,15 @@ class LocalAudioEngine {
       ? [sourceQueue[requestedIndex], ...this.shuffleEntries(sourceQueue.filter((_, index) => index !== requestedIndex))]
       : sourceQueue;
     const index = this.state.shuffleActive ? 0 : requestedIndex;
+    // Keep the currently audible track and metadata visible while a remote
+    // YouTube Music URL is resolving. `loadCurrent` swaps the source and the
+    // metadata together once the new stream is actually ready.
     this.state = {
       ...this.state,
       queue,
       index,
-      track: queue[index],
-      position: 0,
-      length: Number(queue[index]?.duration_ms || 0),
-      canPrevious: true,
-      canNext: true,
+      canPrevious: index > 0 || queue.length > 1,
+      canNext: index < queue.length - 1 || queue.length > 1,
       error: "",
     };
     this.emit();
@@ -231,10 +452,17 @@ class LocalAudioEngine {
     this.recoveryInFlight = false;
     this.clearStallRecoveryTimer();
     this.lastProgressAt = Date.now();
+    // Show the new track's title/cover IMMEDIATELY (like local music) so QAM and
+    // Big Picture update the instant you press next/previous or pick a track —
+    // never waiting for the remote stream to resolve. The old audio is paused so
+    // its position can't tick under the new metadata; the progress bar stays at 0
+    // until the real `playing` event fires with the new audio.
     audio.pause();
-    audio.src = `${this.streamUrl(track)}?v=${encodeURIComponent(String(track?.modifiedAt ?? track?.id ?? Date.now()))}`;
-    audio.load();
     this.patch({ track, position: 0, length: Number(track?.duration_ms || 0), status: autoPlay ? "Paused" : "Stopped", error: "" });
+    const streamUrl = await this.streamUrl(track);
+    if (token !== this.loadingToken) return;
+    audio.src = `${streamUrl}?v=${encodeURIComponent(String(track?.modifiedAt ?? track?.id ?? Date.now()))}`;
+    audio.load();
     if (autoPlay) {
       try {
         await audio.play();
@@ -268,14 +496,14 @@ class LocalAudioEngine {
           const replacement = queue.findIndex((track) => String(track?.id ?? "") !== currentId);
           if (replacement > 0) [queue[0], queue[replacement]] = [queue[replacement], queue[0]];
         }
-        this.patch({ queue, index: 0, track: queue[0], position: 0 });
+        this.patch({ queue, index: 0 });
         await this.loadCurrent(true);
         return this.state;
       }
       index = 0;
     }
     else return this.state;
-    this.patch({ index, track: this.state.queue[index], position: 0 });
+    this.patch({ index });
     await this.loadCurrent(true);
     return this.state;
   }
@@ -290,7 +518,7 @@ class LocalAudioEngine {
     if (!this.state.queue.length) return this.state;
     let index = this.state.index;
     index = index > 0 ? index - 1 : (this.state.repeatMode === "All" ? this.state.queue.length - 1 : 0);
-    this.patch({ index, track: this.state.queue[index], position: 0 });
+    this.patch({ index });
     await this.loadCurrent(true);
     return this.state;
   }
@@ -303,7 +531,7 @@ class LocalAudioEngine {
       if (audio?.paused) await audio.play();
       return this.state;
     }
-    this.patch({ index: nextIndex, track: this.state.queue[nextIndex], position: 0 });
+    this.patch({ index: nextIndex });
     await this.loadCurrent(true);
     return this.state;
   }
@@ -365,6 +593,10 @@ class LocalAudioEngine {
       this.audio.load();
     }
     this.audio = null;
+    if (this.audioContext) void this.audioContext.close().catch(() => {});
+    this.audioContext = null;
+    this.analyser = null;
+    this.frequencyData = null;
     this.originalQueue = [];
     this.recoveryAttempts = 0;
     this.recoveryInFlight = false;
@@ -412,8 +644,10 @@ class LocalAudioEngine {
     const shouldResume = this.state.status === "Playing";
     const resumeAt = Math.max(0, Number(positionMs || 0));
     try {
+      const streamUrl = await this.streamUrl(track);
+      if (token !== this.loadingToken) return;
       audio.pause();
-      audio.src = `${this.streamUrl(track)}?v=${encodeURIComponent(String(track?.modifiedAt ?? track?.id ?? "track"))}&recover=${Date.now()}&reason=${encodeURIComponent(reason)}`;
+      audio.src = `${streamUrl}?v=${encodeURIComponent(String(track?.modifiedAt ?? track?.id ?? "track"))}&recover=${Date.now()}&reason=${encodeURIComponent(reason)}`;
       audio.load();
       await new Promise<void>((resolve, reject) => {
         let settled = false;

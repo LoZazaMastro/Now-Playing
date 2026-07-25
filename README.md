@@ -2,7 +2,7 @@
 
 A console-style music companion for **Decky Loader on Windows**.
 
-Now Playing brings the active Windows media session directly into Steam Big Picture, with album artwork, track information, playback controls, per-app volume, fullscreen visuals, quick access to your favorite music services and an optional advanced Spotify browser powered by the user's personal Spotify Web API app.
+Now Playing brings Spotify, YouTube Music, local files and active Windows media sessions directly into Steam Big Picture, with artwork, playback controls, source volume, fullscreen visuals and controller-first browsing.
 
 ## Features
 
@@ -23,21 +23,21 @@ Now Playing brings the active Windows media session directly into Steam Big Pict
 - Previous and next track.
 - Shuffle.
 - Repeat mode.
-- Per-application volume, allowing Now Playing to control the active music application without changing the main Windows output volume. Volume changes use direct Windows Core Audio access for responsive 1% keyboard and gamepad adjustments, with the bundled helper retained as a compatibility fallback.
+- Per-source volume without changing the main Windows output volume. External applications use direct Windows Core Audio, while Spotify, YouTube Music and Your Music apply volume directly to their integrated player.
 - Source-aware Windows media-session matching for Spotify, TIDAL, Apple Music, Deezer, Amazon Music and SoundCloud, including packaged-app and browser/PWA identifiers.
 
 ### Supported music services
 
 Now Playing includes shortcuts and visual accents for:
 
-- Spotify — Web API browser and Spotify Connect controls
-- Spotify (Player only) — Windows media-session player without Spotify API metadata
+- **Your Music / La tua musica**, the built-in local library and player
+- Spotify — personal library browsing and integrated Spotify Connect playback
+- YouTube Music — Home, Search, Library and integrated playback
 - TIDAL
 - Apple Music
 - Deezer
 - Amazon Music
 - SoundCloud
-- **Your Music / La tua musica**, the built-in local library and player
 
 ### Spotify
 
@@ -53,13 +53,13 @@ When enabled and connected, Spotify is integrated directly below the Now Playing
 - **Play** and **Shuffle** actions for saved tracks, with the loaded tracks passed to Spotify as a continuing playback queue.
 - Album and playlist detail pages with extended track lists and direct artist navigation from album pages.
 - Artist pages organized into popular tracks, followed by albums and singles, with a **See all** control for the complete album list. Each Big Picture artist page ends with a background settings action that searches online artwork, shows its resolution and downloads the selected image for persistent use.
-- Playback through the Spotify desktop app or another available Spotify Connect device.
+- Playback through the private integrated **Playhub Now Playing** Spotify Connect device.
 - Keyboard and gamepad navigation throughout the browser and Spotify Big Picture. B or Escape moves through the internal history first and exits only when there are no Spotify pages left to return to. Returning from an album or artist restores focus to the card that opened it.
 - B and Escape also close the plugin settings view correctly.
 - A controller-friendly Home, Search and Library navigation bar independent from Steam’s native tab container. Each page has exactly one vertical scrolling surface, and Spotify queue browsing is intentionally omitted because the public API cannot provide a consistently editable or shuffle-safe queue experience.
 - When Spotify mode is connected, the current album cover in the player can be selected to open that album directly.
 
-The advanced Spotify mode is fully optional. **Spotify (Player only)** keeps Spotify completely separate from the Web API path and uses only the Windows SMTC/audio session, which remains available without a Spotify developer account. In normal **Spotify** mode, the Web API is the sole authority for metadata, artwork, progress and transport state; MediaBridge cannot overwrite it.
+Spotify is presented as one source. Catalog requests use the local cache and SpotifyScraper where supported; private account and library requests still use the user's Spotify Web API authorization. Playback, metadata, progress and transport state come from the integrated Spotify Connect player whenever it is ready, so Spotify.exe is not required and MediaBridge cannot overwrite the active Spotify state.
 
 #### Spotify setup
 
@@ -77,7 +77,7 @@ The plugin settings include a complete copy-friendly guide. The dashboard flow i
 
 Every value that must be copied appears immediately below its corresponding step inside the plugin settings.
 
-Spotify Development Mode requires the app owner to have Spotify Premium. Playback control also requires an available Spotify Connect device; on Windows, open the Spotify desktop app and start playback once if it is not detected immediately.
+Spotify Development Mode requires the app owner to have Spotify Premium. The integrated player advertises **Playhub Now Playing** as a private Spotify Connect device and does not require Spotify.exe to remain open.
 
 The Client ID and Spotify authorization tokens are stored locally on the PC in the Decky plugin settings directory.
 
@@ -93,8 +93,14 @@ SpotifyScraper currently handles these plugin requests:
 - Artist metadata plus album and single lists.
 - Playlist metadata and public playlist item lists when Spotify exposes them.
 
-The official Spotify Web API is still required for account authorization and profile data, Home and private library content, followed/saved items, playback-device operations and write actions. The plugin does not add faster API polling to compensate for the split. Exported diagnostics show `scraper_hit` and fallback counters so the active path can be verified without exposing credentials.
+The official Spotify Web API is still required for account authorization and profile data, Home and private library content, and followed or saved items. Integrated playback and its live status normally stay on the local bridge; Web API playback calls are a bounded compatibility fallback only when that bridge is unavailable. Exported diagnostics show `scraper_hit` and fallback counters so the active path can be verified without exposing credentials.
 
+
+### YouTube Music
+
+YouTube Music appears immediately after Spotify and provides the same Home, Search, Library and Settings structure in QAM and Big Picture. It uses the bundled MIT-licensed `ytmusicapi` library for browsing and the in-process `yt-dlp` Python library to resolve audio streams without launching an executable. Playback shares the persistent local audio engine used by Your Music, including progress, queue, previous/next, play/pause, shuffle, repeat, volume, top-bar metadata and fullscreen visuals. Low, medium and high audio-quality options are available in Settings, with a red service accent throughout the interface.
+
+Public search and browsing work without authentication. To unlock private library sections, select **Connect YouTube Music**. In the temporary sign-in window shown above Steam, choose your Google account or sign in with the account used for YouTube Music, then leave the window open. Now Playing completes the connection, closes the dedicated window and removes its temporary profile automatically. Credentials remain in the local Decky plugin settings directory and are never included in diagnostics. Manual request-header entry is retained only as an advanced recovery option when automatic sign-in fails.
 
 ### Your Music / La tua musica
 
@@ -118,7 +124,7 @@ Two independent settings control external source applications:
 - **Automatically open source apps** — enabled by default. The matching app opens only when the selected source actually changes and only if its process is not already running.
 - **Close source apps when switching** — enabled by default. The previous external source is paused first, then its exact application processes are closed before the next source is launched. Browser processes are never terminated for PWA fallbacks.
 
-Transitions are serialized and guarded against repeated requests, pending launches and stale session-selection retries. When the selected external application is already running, the QAM shows **Close {app}** instead of a redundant Open action. **Your Music** has no external app to launch or close.
+Transitions are serialized and guarded against repeated requests, pending launches and stale session-selection retries. When the selected external application is already running, the QAM shows **Close {app}** instead of a redundant Open action. **Your Music**, **Spotify** and **YouTube Music** do not launch an external source app.
 
 ### Cover art sources
 
@@ -171,6 +177,10 @@ The album artwork expands into a rich, softly blurred backdrop, surrounding the 
 
 A minimal, distraction-free view designed for long listening sessions, with reduced motion and a darker visual footprint.
 
+**Flower and Circle**
+
+Two lightweight Canvas 2D particle experiences adapted from audible-visuals. They sample their colors from the current cover and react to the real integrated-player audio level through Web Audio for Your Music and YouTube Music, and through the existing Spotify playback bridge for Spotify. They run in the existing frontend animation loop and require no additional process or executable.
+
 ### Steam top bar integration
 
 Show the current track next to the Steam clock while music is playing.
@@ -179,7 +189,7 @@ Show the current track next to the Steam clock while music is playing.
 - Automatically hides when playback is paused or stopped.
 - Can be positioned after the Weather indicator when the Weather plugin is installed.
 - Includes an option to move the clock and Now Playing information to the left side of the top bar.
-- Uses a speaker icon for Your Music and service-specific icons for external applications.
+- Uses a speaker icon for Your Music and service-specific icons for Spotify, YouTube Music and external applications.
 
 ## Languages
 
@@ -196,14 +206,14 @@ Now Playing ships with complete, centrally validated interface translations for:
 - Korean
 - Simplified Chinese
 
-Every bundled language contains the same set of 282 interface strings, setup instructions, empty states and runtime messages. The build fails when a key is missing, a translation is empty, an array has the wrong number of entries or a placeholder such as `{time}` is lost. Steam-style language identifiers such as `italian`, `brazilian`, `koreana` and `schinese` are recognized in addition to normal browser locale codes. Unsupported locales fall back consistently to English rather than mixing translated and untranslated sections.
+Every bundled language contains the same set of interface strings, setup instructions, empty states and runtime messages. The build fails when a key is missing, a translation is empty, an array has the wrong number of entries or a placeholder such as `{time}` is lost. Steam-style language identifiers such as `italian`, `brazilian`, `koreana` and `schinese` are recognized in addition to normal browser locale codes. Unsupported locales fall back consistently to English rather than mixing translated and untranslated sections.
 
 ## Requirements
 
 - Windows 10 or Windows 11.
 - Decky Loader for Windows.
 - A compatible music application exposing a Windows media session.
-- Spotify Premium and a personal Spotify developer Client ID only when using the advanced Spotify mode.
+- Spotify Premium and a personal Spotify developer Client ID for Spotify browsing and playback.
 
 Some applications may expose only part of their controls. Shuffle, repeat, seeking and artwork availability can vary between services and app versions.
 
@@ -216,7 +226,7 @@ Some applications may expose only part of their controls. Shuffle, repeat, seeki
 - Restart the music application and reopen Now Playing.
 - Fully restart Steam if the plugin was just installed or updated.
 
-For external services, start a track once and confirm that Windows media controls can see it. Now Playing 2.1.0 actively selects the session that matches the chosen source, including TIDAL, Apple Music, Deezer, Amazon Music and SoundCloud. Spotify is presented as one source: its browsing data comes from the configured Spotify connection, while playback can use the bundled local player after Spotify has been reconnected with the required permission. Until then, the existing Spotify API playback path remains available.
+For external services, start a track once and confirm that Windows media controls can see it. Now Playing 2.2.0 actively selects the session that matches the chosen source, including TIDAL, Apple Music, Deezer, Amazon Music and SoundCloud. Spotify and YouTube Music use their integrated players and do not depend on a Windows media session exposed by their desktop applications.
 
 ### Artwork is incorrect
 
@@ -262,15 +272,15 @@ Spotify playback helper ownership includes both the installed `bin` directory an
 
 ### Spotify API is temporarily paused
 
-Spotify may temporarily return a rate-limit response when too many Web API requests are made in a short period. Now Playing respects Spotify’s requested cooldown, shows a discreet countdown below **Spotify Big Picture**, and uses cached data whenever possible. Local Windows playback detection, transport controls and per-app volume remain available during the cooldown. While the API is paused, track-selection actions are blocked and show the remaining cooldown instead of opening the Spotify desktop app or redirecting playback.
+Spotify may temporarily return a rate-limit response when too many Web API requests are made in a short period. Now Playing respects Spotify’s requested cooldown, shows a discreet countdown below **Spotify Big Picture**, and uses cached data whenever possible. Integrated playback, local Windows playback detection, transport controls and volume remain available during the cooldown. Catalog actions that require an unavailable API response are blocked and show the remaining cooldown without opening Spotify.exe.
 
 Do not repeatedly reconnect the account or recreate the Spotify developer app: that does not shorten a cooldown already issued by Spotify. Wait for the displayed countdown to finish.
 
 ### Spotify cannot start playback
 
-- Open the Spotify desktop application on the PC.
-- Start any song once so the computer appears as a Spotify Connect device.
 - Confirm that the Spotify account has Premium.
+- Confirm that Spotify is connected in Now Playing Settings and that the requested `streaming` permission was granted.
+- Use **Restart plugin services** to recreate the private **Playhub Now Playing** device if it no longer appears in Spotify Connect.
 - Some public playlist track lists are restricted by Spotify Development Mode; the playlist can still be started as a context even when its individual tracks are not shown.
 
 ## Development
@@ -289,7 +299,7 @@ npm run verify
 npm run package:win
 ```
 
-The installable package includes the compiled frontend, Python backend, bundled Windows helper executables and vendored Python dependencies required for media sessions, local metadata scanning, cover extraction and responsive volume control.
+The installable package includes the compiled frontend, Python backend, three required Windows helpers and vendored Python dependencies. YouTube Music stream resolution runs in-process; direct Windows Core Audio volume control does not require a separate helper executable.
 
 ## License
 
@@ -299,7 +309,7 @@ Released under the [MIT License](LICENSE).
 
 Created and maintained by **LoZazaMastro**.
 
-Now Playing uses Decky Loader, React, `@decky/ui`, `@decky/api`, Windows media/audio APIs, TinyTag, the optional Spotify Web API and librespot for bundled playback on this PC. Full third-party attribution is retained in `NOTICE` and `licenses/`.
+Now Playing uses Decky Loader, React, `@decky/ui`, `@decky/api`, Windows media/audio APIs, TinyTag, the Spotify Web API, librespot, ytmusicapi, yt-dlp and websocket-client. The Flower and Circle fullscreen modes are adapted from audible-visuals. Full third-party attribution is retained in `NOTICE` and `licenses/`.
 
 
 ### Fanart network compatibility
@@ -308,11 +318,11 @@ Fanart downloads use only in-process networking. On Windows the plugin first tri
 
 ### Spotify playback on this PC
 
-Spotify appears as one source. With Spotify Premium and the `streaming` permission, the bundled playback helper registers a private Spotify Connect device named **Now Playing** and supplies playback, metadata, artwork and transport state directly to the plugin. The former Windows-session-only entry is retained only as an internal settings migration alias and is not shown in the interface.
+Spotify appears as one source. With Spotify Premium and the `streaming` permission, the bundled playback helper registers a private Spotify Connect device named **Playhub Now Playing** and supplies playback, metadata, artwork and transport state directly to the plugin. The former Windows-session-only entry is retained only as an internal settings migration alias and is not shown in the interface.
 
 ### Spotify progress and volume synchronization
 
-Spotify uses one saved application-volume value across QAM and Big Picture. The mixer helper applies it to every matching active Spotify audio session, including the bundled local playback process, without changing the Windows device volume. API progress is interpolated locally between samples and shared between QAM and Big Picture using one timestamped playback snapshot. Cover glow remains attached to the current artwork while metadata and high-resolution artwork resolve.
+Spotify uses one saved player-volume value across QAM and Big Picture. It is applied directly to the integrated playback session without changing the Windows device volume. Progress is interpolated locally between bridge samples and shared between QAM and Big Picture. Cover glow remains attached to the current artwork while metadata and high-resolution artwork resolve.
 
 ### Background search limits
 

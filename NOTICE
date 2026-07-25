@@ -79,3 +79,24 @@ Integrated Spotify playback
 The bundled Spotify playback helper uses librespot 0.8.0, distributed under
 the MIT License. Copyright (c) 2015 Paul Lietar and the librespot contributors.
 The complete license text is retained in licenses/librespot-LICENSE.txt.
+
+YouTube Music integration
+-------------------------
+YouTube Music catalogue access uses ytmusicapi, distributed under the MIT
+License. Copyright (c) 2026 sigma67. The complete license text is retained in
+licenses/ytmusicapi-LICENSE.txt.
+
+Playable YouTube Music stream URLs are resolved in-process with yt-dlp, which
+is dedicated to the public domain under the Unlicense. No yt-dlp executable or
+external command-line process is shipped. The complete notice is retained in
+licenses/yt-dlp-LICENSE.txt.
+
+Automatic browser sign-in communicates with the local Chrome DevTools endpoint
+through websocket-client, distributed under the Apache License 2.0. The
+complete license is retained in licenses/websocket-client-LICENSE.txt.
+
+Fullscreen particle visuals
+---------------------------
+The Flower and Circle modes are an independent Canvas 2D adaptation of formulas
+from audible-visuals, distributed under the Apache License 2.0. The original license is retained in
+licenses/audible-visuals-LICENSE.txt.

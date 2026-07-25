@@ -1,0 +1,110 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "專輯"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "藝人"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr "播放清單"
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "歌曲"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr "影片"
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "電台"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "個人資料"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr ""
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "單集"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "單曲"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "ep"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "演出者"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "作曲者"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "製作人"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "音樂中繼資料提供者"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr "專輯"
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "單曲與迷你專輯"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "有聲書與節目"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "影片"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr "精選收錄"
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "粉絲可能也會喜歡"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "最新集數"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr "Podcast"

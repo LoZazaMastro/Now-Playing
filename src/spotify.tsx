@@ -17,7 +17,6 @@ import {
   FaPlay,
   FaPause,
   FaRandom,
-  FaRedoAlt,
   FaSearch,
   FaStepBackward,
   FaStepForward,
@@ -28,6 +27,7 @@ import {
   FaUser,
 } from "react-icons/fa";
 import { SiSpotify } from "react-icons/si";
+import { RepeatIcon } from "./repeatIcon";
 import * as python from "./python";
 import { localAudioPlayer } from "./localAudio";
 import type { PlayerSnapshot, Snapshot, SpotifyApiStatus, SpotifyPlusSettings } from "./python";
@@ -238,6 +238,27 @@ function normalizeAlbum(entry: any): any {
   return entry?.album ?? entry;
 }
 
+// Build a now-playing snapshot straight from the track the user just started, so
+// QAM/Big Picture show the cover and metadata INSTANTLY (like local music)
+// instead of waiting several seconds for the bridge to report the new track.
+function optimisticSpotifySnapshotFromTrack(entry: any): PlayerSnapshot | null {
+  const track = normalizeTrack(entry);
+  if (!track || !track.name) return null;
+  const images = Array.isArray(track?.album?.images) ? track.album.images : Array.isArray(track?.images) ? track.images : [];
+  const artworkUrl = Array.isArray(images) && images.length
+    ? String([...images].filter((image: any) => image?.url).sort((left: any, right: any) => (Number(right?.width || 0) * Number(right?.height || 0)) - (Number(left?.width || 0) * Number(left?.height || 0)))[0]?.url ?? "")
+    : "";
+  const artist = Array.isArray(track?.artists) ? track.artists.map((value: any) => value?.name).filter(Boolean).join(", ") : String(track?.artist ?? "");
+  return {
+    id: "spotify-api", name: "Spotify",
+    title: String(track?.name ?? ""), artist, album: String(track?.album?.name ?? ""),
+    status: "Playing", length: Number(track?.duration_ms ?? 0), position: 0,
+    canNext: true, canPrevious: true, canPlay: true, canPause: true, canTogglePlayPause: true,
+    isSelected: true, isCurrent: true, canShuffle: true, canRepeat: true,
+    shuffleActive: false, repeatMode: "Off", artworkUrl, volume: 100,
+  };
+}
+
 function itemType(item: any): "track" | "album" | "artist" | "playlist" | "unknown" {
   const type = String(item?.type ?? "").toLowerCase();
   if (type === "track" || type === "album" || type === "artist" || type === "playlist") return type;
@@ -266,7 +287,7 @@ function SpotifyLogoTitle({ subtitle }: { subtitle?: string }) {
   );
 }
 
-function SpotifyArtwork({ url, size = 42, round = false }: { url?: string; size?: number; round?: boolean }) {
+export function SpotifyArtwork({ url, size = 42, round = false }: { url?: string; size?: number; round?: boolean }) {
   const radius = round ? "50%" : "5px";
   return (
     <div
@@ -292,7 +313,7 @@ function SpotifyArtwork({ url, size = 42, round = false }: { url?: string; size?
   );
 }
 
-function SpotifyRow({
+export function SpotifyRow({
   item,
   subtitle,
   onActivate,
@@ -301,6 +322,7 @@ function SpotifyRow({
   sideAction,
   buttonRef,
   preferredFocus,
+  onFocus,
 }: {
   item: any;
   subtitle?: string;
@@ -310,6 +332,7 @@ function SpotifyRow({
   sideAction?: { icon: React.ReactNode; label: string; onActivate: () => void };
   buttonRef?: any;
   preferredFocus?: boolean;
+  onFocus?: () => void;
 }) {
   const t = resolveSpotifyTranslations();
   const mainButton = (
@@ -317,6 +340,10 @@ function SpotifyRow({
       ref={buttonRef}
       preferredFocus={preferredFocus}
       className="npSpotifyResultButton"
+      {...({ onFocus: (event: any) => {
+        event?.currentTarget?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "smooth" });
+        onFocus?.();
+      } } as any)}
       style={{
         ...fullButtonStyle,
         width: sideAction ? "auto" : "100%",
@@ -421,6 +448,8 @@ export function SpotifyPlusSettingsPanel({
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [artistCacheProgress, setArtistCacheProgress] = useState<python.SpotifyArtistCacheProgress>({ active: false, phase: "idle", current: "", completed: 0, total: 0 });
   const [artistCacheStats, setArtistCacheStats] = useState<python.AssetCacheStats>({ bytes: 0, files: 0 });
+  const [audioCacheStats, setAudioCacheStats] = useState<{ bytes: number; limitBytes: number }>({ bytes: 0, limitBytes: 5 * 1024 * 1024 * 1024 });
+  const [apiUsage, setApiUsage] = useState<{ total: number; perMinute: number; rateLimited: boolean; remainingSeconds: number }>({ total: 0, perMinute: 0, rateLimited: false, remainingSeconds: 0 });
   const pollRef = useRef<number>(0);
   const artistCachePollRef = useRef<number>(0);
 
@@ -448,14 +477,39 @@ export function SpotifyPlusSettingsPanel({
     }
   }, []);
 
+  const reloadAudioCacheStats = useCallback(async () => {
+    try {
+      const result = await python.getSpotifyAudioCacheStats();
+      if (result?.ok && result.data) setAudioCacheStats({ bytes: Number(result.data.bytes || 0), limitBytes: Number(result.data.limitBytes || 5 * 1024 * 1024 * 1024) });
+    } catch {
+      // Keep the last known size if the filesystem is momentarily unavailable.
+    }
+  }, []);
+
   useEffect(() => {
     void reload();
     void reloadArtistCacheStats();
+    void reloadAudioCacheStats();
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
       if (artistCachePollRef.current) window.clearInterval(artistCachePollRef.current);
     };
-  }, [reload, reloadArtistCacheStats]);
+  }, [reload, reloadArtistCacheStats, reloadAudioCacheStats]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await python.getSpotifyApiUsage();
+        if (!cancelled && result?.ok && result.data) setApiUsage(result.data);
+      } catch {
+        // Reading usage never makes a Spotify request; ignore transient errors.
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 3000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, []);
 
   useEffect(() => {
     if (settings.authenticated) setSetupDetailsOpen(false);
@@ -513,6 +567,7 @@ export function SpotifyPlusSettingsPanel({
       showError(error?.message ?? String(error));
     } finally {
       setAudioCacheBusy(false);
+      void reloadAudioCacheStats();
     }
   }
 
@@ -882,6 +937,15 @@ export function SpotifyPlusSettingsPanel({
             })}
           </Focusable>
           <p style={{ margin: "7px 2px 10px", fontSize: "0.67em", lineHeight: 1.4, opacity: 0.56 }}>{t.musicCacheDescription}</p>
+          <div style={{ margin: "0 2px 8px", display: "flex", flexDirection: "column", gap: "5px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: "0.72em", opacity: 0.82 }}>
+              <span>{t.musicCacheUsage}</span>
+              <span style={{ fontVariantNumeric: "tabular-nums" }}>{(audioCacheStats.bytes / 1073741824).toFixed(2)} GB / {Math.round(audioCacheStats.limitBytes / 1073741824)} GB</span>
+            </div>
+            <div style={{ position: "relative", height: "6px", borderRadius: "999px", background: "rgba(255,255,255,0.12)", overflow: "hidden" }}>
+              <div style={{ position: "absolute", inset: 0, width: `${Math.max(0, Math.min(100, (audioCacheStats.bytes / Math.max(1, audioCacheStats.limitBytes)) * 100))}%`, background: SPOTIFY_GREEN, borderRadius: "999px" }} />
+            </div>
+          </div>
           <DialogButton style={fullButtonStyle} disabled={audioCacheBusy} onClick={() => void clearAudioCache()}>
             <span><FaTimes /> {audioCacheBusy ? t.clearingMusicCache : t.clearMusicCache}</span>
           </DialogButton>
@@ -932,6 +996,19 @@ export function SpotifyPlusSettingsPanel({
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><span style={{ opacity: .58 }}>{t.cacheSize}</span><strong>{(Math.max(0, Number(artistCacheStats.bytes || 0)) / (1024 * 1024)).toFixed(2)} MB</strong></div>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><span style={{ opacity: .58 }}>{t.manualBackgrounds}</span><strong>{(Math.max(0, Number(artistCacheStats.manualBytes || 0)) / (1024 * 1024)).toFixed(2)} MB</strong></div>
             </div>
+          </div>
+          <div style={{ marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
+              <span style={{ fontSize: "0.76em", fontWeight: 700 }}>{t.apiUsageTitle}</span>
+              <span style={{ fontSize: "0.66em", opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{apiUsage.total} {t.apiUsageTotal}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <div style={{ position: "relative", flex: 1, height: "6px", borderRadius: "999px", background: "rgba(255,255,255,0.12)", overflow: "hidden" }}>
+                <div style={{ position: "absolute", inset: 0, width: `${Math.max(0, Math.min(100, (apiUsage.perMinute / 60) * 100))}%`, background: apiUsage.rateLimited ? "#ff7777" : SPOTIFY_GREEN, borderRadius: "999px", transition: "width 240ms ease" }} />
+              </div>
+              <span style={{ fontSize: "0.68em", fontVariantNumeric: "tabular-nums", minWidth: "76px", textAlign: "right" }}>{apiUsage.perMinute} {t.apiUsagePerMinute}</span>
+            </div>
+            {apiUsage.rateLimited ? <div style={{ marginTop: "6px", fontSize: "0.64em", color: "#ff9a9a" }}>{t.apiUsagePaused}{apiUsage.remainingSeconds > 0 ? ` · ${apiUsage.remainingSeconds}s` : ""}</div> : null}
           </div>
         </div>
       </div>
@@ -1037,13 +1114,25 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
       return;
     }
     void run(
-      () => python.spotifyGetLibrary(section, 0, section === "tracks" ? 50 : 100),
+      // Saved tracks: 50 while compact, otherwise 0 = load the whole library so
+      // the user can see and play every saved track.
+      () => python.spotifyGetLibrary(section, 0, section === "tracks" ? (compactSavedTracks ? 50 : 0) : 100),
       (value) => {
         spotifyLibrarySessionCache.set(section, value);
         setLibrary(value);
       },
     );
-  }, [requestListFocus, run]);
+  }, [requestListFocus, run, compactSavedTracks]);
+
+  const compactInitRef = useRef(true);
+  useEffect(() => {
+    // When the saved-tracks compaction setting changes, drop the cached page and
+    // re-fetch so the list reflects the new limit (50 vs the whole library).
+    if (compactInitRef.current) { compactInitRef.current = false; return; }
+    spotifyLibrarySessionCache.delete("tracks");
+    if (librarySection === "tracks") loadLibrary("tracks", false, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compactSavedTracks]);
 
   const executeSearch = useCallback(() => {
     const query = searchTerm.trim();
@@ -1161,6 +1250,8 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
     try {
       const result = await python.spotifyPlayItems(uris, Math.max(0, Math.min(startIndex, uris.length - 1)));
       if (!result.ok) throw new Error(result.error || t.unableStartPlayback);
+      const optimistic = optimisticSpotifySnapshotFromTrack(entries[Math.max(0, Math.min(startIndex, entries.length - 1))]);
+      if (optimistic) publishSpotifyPlaybackSnapshot(optimistic);
       notifySpotifyPlaybackChanged();
     } catch (error: any) {
       showError(error?.message ?? String(error));
@@ -1438,10 +1529,10 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
         <div style={sectionLabelStyle}>{sectionLabels[librarySection]}</div>
         {librarySection === "tracks" && items.length ? (
           <Focusable flow-children="horizontal" style={{ display: "flex", gap: "6px", marginBottom: "7px" }}>
-            <DialogButton style={{ ...fullButtonStyle, flex: 1, minWidth: 0, background: SPOTIFY_GREEN, color: "#050505" }} onClick={() => void playTrackList(items.slice(0, 50), 0)}>
+            <DialogButton style={{ ...fullButtonStyle, flex: 1, minWidth: 0, background: SPOTIFY_GREEN, color: "#050505" }} onClick={() => void playTrackList(items, 0)}>
               <span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 800, fontSize: "0.8em" }}><FaPlay /> {t.play}</span>
             </DialogButton>
-            <DialogButton style={{ ...fullButtonStyle, flex: 1, minWidth: 0 }} onClick={() => { const shuffled = [...items.slice(0, 50)].sort(() => Math.random() - .5); void playTrackList(shuffled, 0); }}>
+            <DialogButton style={{ ...fullButtonStyle, flex: 1, minWidth: 0 }} onClick={() => { const shuffled = [...items].sort(() => Math.random() - .5); void playTrackList(shuffled, 0); }}>
               <span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 700, fontSize: "0.8em" }}><FaRandom /> {t.shuffle}</span>
             </DialogButton>
           </Focusable>
@@ -1452,7 +1543,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
             {onOpenSettings ? <DialogButton style={{ ...fullButtonStyle, marginTop: "8px" }} onClick={onOpenSettings}><span style={{ fontSize: "0.82em" }}>{t.changeInSettings}</span></DialogButton> : null}
           </div>
         ) : null}
-        {librarySection === "tracks" ? (compactSavedTracks ? null : renderTrackRows(items.slice(0, 50), "", "", true, true, firstResultRef)) : items.map((entry: any, index: number) => {
+        {librarySection === "tracks" ? (compactSavedTracks ? null : renderTrackRows(items.slice(0, 100), "", "", true, true, firstResultRef)) : items.map((entry: any, index: number) => {
           const item = librarySection === "albums" ? normalizeAlbum(entry) : entry;
           return (
             <SpotifyRow
@@ -1666,7 +1757,7 @@ function moveSpotifySixColumnGridFocus(event: any, delta: number) {
 }
 
 
-function SpotifyTvCard({
+export function SpotifyTvCard({
   item,
   onActivate,
   round = false,
@@ -1741,13 +1832,14 @@ function SpotifyTvCard({
   );
 }
 
-function SpotifyTvTrack({
+export function SpotifyTvTrack({
   track,
   index,
   onActivate,
   preferredFocus = false,
   buttonRef,
   showArtwork = true,
+  onFocus,
 }: {
   track: any;
   index: number;
@@ -1755,6 +1847,7 @@ function SpotifyTvTrack({
   preferredFocus?: boolean;
   buttonRef?: any;
   showArtwork?: boolean;
+  onFocus?: () => void;
 }) {
   const normalized = normalizeTrack(track);
   return (
@@ -1762,7 +1855,10 @@ function SpotifyTvTrack({
       ref={buttonRef}
       preferredFocus={preferredFocus}
       className="npSpotifyTvTrack"
-      {...({ onFocus: (event: any) => event?.currentTarget?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "smooth" }) } as any)}
+      {...({ onFocus: (event: any) => {
+        event?.currentTarget?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "smooth" });
+        onFocus?.();
+      } } as any)}
       onClick={onActivate}
       style={{
         width: "100%",
@@ -1827,13 +1923,15 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   const [rateLimitStatus, setRateLimitStatus] = useState<SpotifyApiStatus>({ active: false, remainingSeconds: 0, until: 0 });
   const [settingsReady, setSettingsReady] = useState(false);
   const [compactSavedTracks, setCompactSavedTracks] = useState(true);
-  const [showAllDetail, setShowAllDetail] = useState(false);
+  const [libraryTrackVisibleCount, setLibraryTrackVisibleCount] = useState(120);
+  const [detailTrackVisibleCount, setDetailTrackVisibleCount] = useState(120);
   const [restoreFocusKey, setRestoreFocusKey] = useState("");
   const [backgroundSettingsOpen, setBackgroundSettingsOpen] = useState(false);
   const requestSerial = useRef(0);
   const firstContentRef = useRef<any>(null);
   const playerCoverRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const homeTabRef = useRef<any>(null);
   const snapshotBusyRef = useRef(false);
   const coverRequestRef = useRef(0);
   const coverClearTimerRef = useRef<number>(0);
@@ -1968,7 +2066,10 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   const refreshSnapshot = useCallback(async (force = false) => {
     if (snapshotBusyRef.current || rateLimitActiveRef.current) return;
     const now = Date.now();
-    if (!force && now - spotifyPlaybackCacheRef.current.at < 3500) return;
+    // Poll roughly once a second: while the integrated bridge is ready the backend
+    // serves its snapshot with no Web API call, so a track change (including an
+    // automatic advance) shows within ~1 s instead of lagging 3-4 s behind audio.
+    if (!force && now - spotifyPlaybackCacheRef.current.at < 1000) return;
 
     snapshotBusyRef.current = true;
     try {
@@ -1995,6 +2096,16 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     } finally {
       snapshotBusyRef.current = false;
     }
+  }, []);
+
+  useEffect(() => {
+    let tries = 0;
+    const focusHome = () => {
+      const element = homeTabRef.current as HTMLElement | null;
+      if (element && typeof element.focus === "function") { try { element.focus(); return; } catch { /* retry */ } }
+      if (tries++ < 20) window.requestAnimationFrame(focusHome);
+    };
+    focusHome();
   }, []);
 
   useEffect(() => {
@@ -2031,23 +2142,37 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
       return;
     }
     void run(
-      () => python.spotifyGetLibrary(section, 0, section === "tracks" ? 50 : 0),
+      // Load the whole saved-tracks library when compaction is off so the Big
+      // Picture list can show and play every track (50 while compact).
+      () => python.spotifyGetLibrary(section, 0, section === "tracks" ? (compactSavedTracks ? 50 : 0) : 0),
       (value) => {
         spotifyLibrarySessionCache.set(section, value);
         setLibrary(value);
       },
     );
-  }, [focusFirst, run]);
+  }, [focusFirst, run, compactSavedTracks]);
+
+  const compactInitBpRef = useRef(true);
+  useEffect(() => {
+    if (compactInitBpRef.current) { compactInitBpRef.current = false; return; }
+    spotifyLibrarySessionCache.delete("tracks");
+    if (librarySection === "tracks") loadLibrary("tracks", true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compactSavedTracks]);
 
 
   const requestDetail = useCallback((next: DetailState) => {
     setBackgroundSettingsOpen(false);
     setDetail(next);
     setDetailData(null);
-    setShowAllDetail(false);
+    setDetailTrackVisibleCount(120);
     focusFirst();
     void run(() => python.spotifyGetDetail(next.kind, next.id), setDetailData, 900);
   }, [focusFirst, run]);
+
+  useEffect(() => {
+    setLibraryTrackVisibleCount(120);
+  }, [librarySection, library]);
 
   const openDetail = useCallback((item: any, focusKey = "") => {
     const type = itemType(item);
@@ -2372,7 +2497,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
       const result = await python.spotifyPlay(uri, contextUri, offsetUri);
       if (!result?.ok) throw new Error(result?.error || t.unableStartPlayback);
       notifySpotifyPlaybackChanged();
-      [100, 380, 900].forEach((delay) => window.setTimeout(() => void refreshSnapshot(), delay));
+      window.setTimeout(() => void refreshSnapshot(), 260);
     } catch (error: any) {
       handleApiError(error?.message ?? String(error));
     }
@@ -2393,8 +2518,10 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     try {
       const result = await python.spotifyPlayItems(uris, Math.max(0, Math.min(startIndex, uris.length - 1)));
       if (!result?.ok) throw new Error(result?.error || t.unableStartPlayback);
+      const optimistic = optimisticSpotifySnapshotFromTrack(entries[Math.max(0, Math.min(startIndex, entries.length - 1))]);
+      if (optimistic) publishSpotifyPlaybackSnapshot(optimistic);
       notifySpotifyPlaybackChanged();
-      [100, 380, 900].forEach((delay) => window.setTimeout(() => void refreshSnapshot(), delay));
+      window.setTimeout(() => void refreshSnapshot(), 260);
     } catch (error: any) {
       handleApiError(error?.message ?? String(error));
     }
@@ -2420,7 +2547,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
       notifySpotifyPlaybackChanged();
       spotifyPlaybackCacheRef.current = { ...spotifyPlaybackCacheRef.current, at: 0 };
     }).catch(() => {});
-    [140, 620, 1600].forEach((delay) => window.setTimeout(() => void refreshSnapshot(true), delay));
+    window.setTimeout(() => void refreshSnapshot(false), 260);
   }
 
   function changeVolume(value: number) {
@@ -2670,7 +2797,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
               )}
               style={{ position: "relative", width: "100%", minWidth: 0, height: "46px", minHeight: "46px", padding: 0, opacity: current?.repeatMode && !["None", "Off"].includes(current.repeatMode) ? 1 : .62 }}
             >
-              <FaRedoAlt size={16} />
+              <RepeatIcon one={current?.repeatMode === "Track"} size={17} />
               {current?.repeatMode && !["None", "Off"].includes(current.repeatMode) ? <span aria-hidden="true" style={{ position: "absolute", top: 7, right: 8, width: 6, height: 6, borderRadius: 999, background: SPOTIFY_GREEN, boxShadow: `0 0 8px ${SPOTIFY_GREEN}` }} /> : null}
             </DialogButton>
             </Focusable>
@@ -2797,7 +2924,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
       artists: t.artists,
     };
     const entries = librarySection === "artists" ? (library?.artists?.items ?? []) : (library?.items ?? []);
-    const visible = entries;
+    const visible = librarySection === "tracks" ? entries.slice(0, libraryTrackVisibleCount) : entries;
     return (
       <>
         <Focusable flow-children="horizontal" style={{ display: "flex", gap: "9px", marginTop: "4px" }}>
@@ -2817,10 +2944,17 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
           <>
             {entries.length ? (
               <Focusable flow-children="horizontal" style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
-                <DialogButton style={{ width: "190px", minWidth: "190px", height: "46px" }} onClick={() => void playTrackList(entries.slice(0, 50), 0)}>
+                <DialogButton style={{ width: "190px", minWidth: "190px", height: "46px" }} onClick={() => void playTrackList(entries, 0)}>
                   <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontWeight: 550 }}><FaPlay /> {t.play}</span>
                 </DialogButton>
-                <DialogButton style={{ width: "190px", minWidth: "190px", height: "46px" }} onClick={() => { const shuffled = [...entries.slice(0, 50)].sort(() => Math.random() - .5); void playTrackList(shuffled, 0); }}>
+                <DialogButton style={{ width: "190px", minWidth: "190px", height: "46px" }} onClick={() => {
+                  const shuffled = [...entries];
+                  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+                    const swap = Math.floor(Math.random() * (index + 1));
+                    [shuffled[index], shuffled[swap]] = [shuffled[swap], shuffled[index]];
+                  }
+                  void playTrackList(shuffled, 0);
+                }}>
                   <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontWeight: 550 }}><FaRandom /> {t.shuffle}</span>
                 </DialogButton>
               </Focusable>
@@ -2832,8 +2966,18 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
               </div>
             ) : (
               <Focusable flow-children="vertical">
-                {visible.slice(0, 50).map((track: any, index: number) => (
-                  <SpotifyTvTrack key={`${normalizeTrack(track)?.id ?? index}-${index}`} track={track} index={index} onActivate={() => void playTrackList(entries.slice(0, 50), index)} />
+                {visible.map((track: any, index: number) => (
+                  <SpotifyTvTrack
+                    key={`${normalizeTrack(track)?.id ?? index}-${index}`}
+                    track={track}
+                    index={index}
+                    onFocus={() => {
+                      if (index >= visible.length - 18 && visible.length < entries.length) {
+                        setLibraryTrackVisibleCount((current) => Math.min(entries.length, current + 120));
+                      }
+                    }}
+                    onActivate={() => void playTrackList(entries, index)}
+                  />
                 ))}
               </Focusable>
             )}
@@ -2898,7 +3042,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
     const item = detailData?.item;
     const tracks = detail.kind === "artist" ? (detailData?.topTracks?.tracks ?? []) : (detailData?.tracks?.items ?? []);
     const albums = detailData?.albums?.items ?? [];
-    const visibleTracks = showAllDetail ? tracks : tracks.slice(0, 50);
+    const visibleTracks = tracks.slice(0, detailTrackVisibleCount);
     const contextUri = String(item?.uri ?? `spotify:${detail.kind}:${detail.id}`);
     const albumArtist = item?.artists?.[0];
     const albumYear = detail.kind === "album" ? releaseYear(item) : "";
@@ -3047,6 +3191,11 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
                 track={track}
                 index={index}
                 showArtwork={!isAlbum}
+                onFocus={() => {
+                  if (index >= visibleTracks.length - 18 && visibleTracks.length < tracks.length) {
+                    setDetailTrackVisibleCount((current) => Math.min(tracks.length, current + 120));
+                  }
+                }}
                 onActivate={() => isAlbum
                   ? void play(String(normalizeTrack(track)?.uri ?? ""), contextUri, String(normalizeTrack(track)?.uri ?? ""))
                   : void playTrackList(tracks, index)}
@@ -3054,11 +3203,6 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
             ))}
           </Focusable>
           {!tracks.length && !loading ? <div style={{ fontSize: "19px", opacity: 0.55 }}>{t.noTracks}</div> : null}
-          {tracks.length > visibleTracks.length ? (
-            <DialogButton style={{ width: "190px", minWidth: "190px", height: "44px", marginTop: "15px" }} onClick={() => setShowAllDetail(true)}>
-              {t.seeAll}
-            </DialogButton>
-          ) : null}
         </section>
       </>
     );
@@ -3180,7 +3324,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
 
       {!detail ? (
         <>
-          <Focusable className="npSpotifyCustomTabs" flow-children="horizontal" style={{ position: "absolute", top: 24, left: 56, zIndex: 200, display: "flex", alignItems: "center", gap: 8 }}>
+          <Focusable className="npSpotifyCustomTabs" flow-children="horizontal" onButtonDown={(event: any) => { if (event?.detail?.button === GamepadButton.DIR_UP) { event?.preventDefault?.(); event?.stopPropagation?.(); } }} style={{ position: "absolute", top: 24, left: 56, zIndex: 200, display: "flex", alignItems: "center", gap: 8 }}>
             {([[
               "home", t.home, FaHome,
             ], [
@@ -3190,7 +3334,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
             ], [
               "settings", t.settings, FaCog,
             ]] as const).map(([id, label, Icon]) => (
-              <DialogButton key={id} className={`npSpotifyCustomTab${id !== "settings" && tab === id ? " npSpotifyCustomTabActive" : ""}`} onClick={() => id === "settings" ? onOpenSettings?.() : switchTab(id)} style={{ width: 138, minWidth: 138, height: 38, minHeight: 38, padding: 0 }}>
+              <DialogButton key={id} ref={id === "home" ? homeTabRef : undefined} className={`npSpotifyCustomTab${id !== "settings" && tab === id ? " npSpotifyCustomTabActive" : ""}`} onClick={() => id === "settings" ? onOpenSettings?.() : switchTab(id)} style={{ width: 138, minWidth: 138, height: 38, minHeight: 38, padding: 0 }}>
                 <span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: ".76em", fontWeight: 540 }}><Icon size={13} /> {label}</span>
               </DialogButton>
             ))}

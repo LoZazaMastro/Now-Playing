@@ -3,6 +3,7 @@ import catalogs from "./locales.json";
 export type TranslationSection = keyof typeof catalogs.en;
 export type CoreTranslation = typeof catalogs.en.core;
 export type SpotifyTranslation = typeof catalogs.en.spotify;
+export type YouTubeMusicTranslation = typeof catalogs.en.youtubeMusic;
 export type LocalMusicTranslation = typeof catalogs.en.localMusic;
 export type RuntimeTranslation = typeof catalogs.en.runtime;
 export type SupportedLocale = keyof typeof catalogs;

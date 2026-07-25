@@ -6,10 +6,8 @@ release/
 __pycache__/
 *.pyc
 
-# --- Binari compilati (ricostruibili dai sorgenti, distribuiti via GitHub Releases) ---
-*.exe
-*.pdb
-bin/
+# --- Intermedi di build dei bridge ---
+# I binari finali stanno in bin/ e vengono committati (pubblicazione via GitHub Desktop).
 AppVolumeBridge/publish/
 AppVolumeBridge/bin/
 AppVolumeBridge/obj/

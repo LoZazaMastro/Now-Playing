@@ -1,0 +1,110 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "album"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "artista"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr ""
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "brano"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr ""
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "stazione"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "profilo"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr ""
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "Puntata"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "singolo"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "ep"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "Eseguito da"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "Scritto da"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "Prodotto da"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "Metadati dei contenuti musicali forniti da"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr "album"
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "singoli ed ep"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "Audiolibri e programmi"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "video"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr "playlist"
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "ai fan potrebbe anche piacere"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "puntate più recenti"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr "podcast"

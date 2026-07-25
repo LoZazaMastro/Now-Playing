@@ -1,4 +1,5 @@
 import csv
+import copy
 import ctypes
 import hashlib
 import io
@@ -36,6 +37,12 @@ from pathlib import Path
 
 import decky_plugin
 
+_PLUGIN_SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PLUGIN_SOURCE_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_SOURCE_DIR)
+from ytmusic_service import YouTubeMusicService
+
+SPOTIFY_AUDIO_CACHE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024
 TOPBAR_CEF_PORT = 8080
 TOPBAR_BADGE_ID = "decky-nowplaying-topbar-badge"
 TOPBAR_STYLE_ID = "decky-nowplaying-topbar-style"
@@ -352,9 +359,10 @@ class LocalMusicStreamServer:
     and supports HTTP Range requests for seeking.
     """
 
-    def __init__(self, track_resolver, asset_resolver, logger) -> None:
+    def __init__(self, track_resolver, asset_resolver, logger, remote_resolver=None) -> None:
         self._track_resolver = track_resolver
         self._asset_resolver = asset_resolver
+        self._remote_resolver = remote_resolver
         self._logger = logger
         self._server = None
         self._thread = None
@@ -407,11 +415,14 @@ class LocalMusicStreamServer:
                 try:
                     parsed = urllib.parse.urlparse(self.path)
                     pieces = [urllib.parse.unquote(piece) for piece in parsed.path.split("/") if piece]
-                    if len(pieces) != 3 or pieces[0] != parent.token or pieces[1] not in {"track", "cover", "artist", "background", "spotify-background", "preview"}:
+                    if len(pieces) != 3 or pieces[0] != parent.token or pieces[1] not in {"track", "ytmusic-track", "cover", "artist", "background", "spotify-background", "youtubemusic-background", "preview"}:
                         self.send_error(404)
                         return
                     resource_kind = pieces[1]
                     resource_id = pieces[2]
+                    if resource_kind == "ytmusic-track":
+                        self._serve_remote(resource_id, include_body)
+                        return
                     path = str(parent._track_resolver(resource_id) if resource_kind == "track" else parent._asset_resolver(resource_kind, resource_id) or "")
                     if not path or not os.path.isfile(path):
                         self.send_error(404)
@@ -527,6 +538,63 @@ class LocalMusicStreamServer:
                     except Exception:
                         pass
 
+            def _serve_remote(self, resource_id: str, include_body: bool) -> None:
+                if parent._remote_resolver is None:
+                    self.send_error(404)
+                    return
+                stream = parent._remote_resolver(resource_id)
+                if not isinstance(stream, dict) or not str(stream.get("url") or "").startswith("http"):
+                    self.send_error(404)
+                    return
+                headers = {
+                    str(key): str(value)
+                    for key, value in (stream.get("headers") or {}).items()
+                    if str(key).lower() not in {"host", "content-length", "connection", "accept-encoding"}
+                }
+                range_header = str(self.headers.get("Range") or "").strip()
+                if range_header:
+                    headers["Range"] = range_header
+                request = urllib.request.Request(str(stream.get("url")), headers=headers, method="GET")
+                remote = None
+                try:
+                    remote = urllib.request.urlopen(request, timeout=18)
+                    status = int(getattr(remote, "status", 200) or 200)
+                    self.send_response(status)
+                    self._cors("track")
+                    for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+                        value = remote.headers.get(name)
+                        if value:
+                            self.send_header(name, value)
+                    self.send_header("Content-Disposition", "inline")
+                    self.end_headers()
+                    if include_body:
+                        while True:
+                            chunk = remote.read(256 * 1024)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                except urllib.error.HTTPError as exc:
+                    status = int(getattr(exc, "code", 502) or 502)
+                    self.send_response(status)
+                    self._cors("track")
+                    content_range = str((getattr(exc, "headers", None) or {}).get("Content-Range") or "")
+                    if content_range:
+                        self.send_header("Content-Range", content_range)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                except Exception as exc:
+                    parent._log(f"YouTube Music stream proxy error: {exc}")
+                    self.send_error(502)
+                finally:
+                    if remote is not None:
+                        try:
+                            remote.close()
+                        except Exception:
+                            pass
+                    self.close_connection = True
+
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         self.port = int(self._server.server_address[1])
@@ -581,6 +649,15 @@ class Plugin:
         self._spotify_control_override_until = 0.0
         self._spotify_playback_bridge_error = ""
         self._spotify_playback_bridge_retry_at = 0.0
+        self._spotify_managed_queue_lock = threading.RLock()
+        self._spotify_managed_queue: Dict[str, Any] = {
+            "uris": [],
+            "next_index": 0,
+            "chunk_end_uri": "",
+            "active": False,
+            "retry_at": 0.0,
+        }
+        self._spotify_managed_queue_chunk_size = 180
         # MediaBridge no longer owns a fixed global port. A registered healthy
         # instance is reused; otherwise a fresh loopback port is allocated. This
         # prevents stale HTTP.sys registrations from permanently blocking startup.
@@ -673,6 +750,8 @@ class Plugin:
         self._volume_request_lock = threading.Lock()
         self._volume_request_revisions: Dict[str, int] = {}
         self._spotify_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="NowPlaying-Spotify")
+        self._youtube_music_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="NowPlaying-YouTubeMusic")
+        self._youtube_music_prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="NowPlaying-YTM-Prefetch")
         self._source_lifecycle_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="NowPlaying-SourceLifecycle")
 
         # Spotify mode uses the user's own Spotify developer Client ID and the
@@ -681,6 +760,13 @@ class Plugin:
         if not isinstance(settings_root, str) or not settings_root.strip():
             settings_root = os.path.join(tempfile.gettempdir(), "NowPlaying-settings")
         self.spotify_settings_dir = settings_root
+        self._youtube_music = YouTubeMusicService(
+            settings_root,
+            self._volume_vendor_path(),
+            self._log,
+            self._launch_youtube_music_auth_browser,
+            self._terminate_process_native,
+        )
         self.source_behavior_settings_path = os.path.join(settings_root, "source-behavior.json")
         self._source_behavior_settings = self._load_source_behavior_settings()
         self._source_transition_lock: Optional[asyncio.Lock] = None
@@ -701,12 +787,21 @@ class Plugin:
         self._spotify_cache_lock = threading.Lock()
         self._spotify_cache_max_entries = 256
         self._spotify_disk_cache_dir = os.path.join(self.spotify_settings_dir, "spotify-api-cache")
+        # Complete library metadata lives separately from the audio cache and
+        # from short-lived Web API response pages. It is invalidated only by the
+        # explicit Spotify refresh/disconnect actions.
+        self._spotify_library_cache_path = os.path.join(self.spotify_settings_dir, "spotify-library-cache.json")
+        self._spotify_library_cache_lock = threading.RLock()
         self._spotify_playback_state_cache: Dict[str, Any] = {}
         self._spotify_playback_state_cache_at = 0.0
         self._spotify_playback_state_last_valid_at = 0.0
         self._spotify_request_lock = threading.RLock()
         self._spotify_last_request_at = 0.0
         self._spotify_min_request_interval = 0.22
+        # Live Spotify Web API usage counters (updated on each outbound call; read
+        # by the settings meter without making any extra request).
+        self._spotify_api_call_total = 0
+        self._spotify_api_call_times: List[float] = []
         self._spotify_scraper_lock = threading.RLock()
         self._spotify_scraper_client: Any = None
         self._spotify_scraper_available: Optional[bool] = None
@@ -761,6 +856,13 @@ class Plugin:
         self.local_music_cover_dir = os.path.join(settings_root, "local-music-covers")
         self.local_music_artist_profile_dir = os.path.join(settings_root, "local-music-artist-profiles")
         self.local_music_artist_background_dir = os.path.join(settings_root, "local-music-artist-backgrounds")
+        self.youtube_music_artist_background_dir = os.path.join(settings_root, "youtube-music-artist-backgrounds")
+        self._youtube_music_artist_background_cache: Dict[str, str] = {}
+        self._youtube_music_artist_cache_build_lock = threading.Lock()
+        self._youtube_music_artist_cache_progress_lock = threading.Lock()
+        self._youtube_music_artist_cache_progress: Dict[str, Any] = {
+            "active": False, "phase": "idle", "current": "", "completed": 0, "total": 0, "error": "",
+        }
         self.artist_background_preview_dir = os.path.join(tempfile.gettempdir(), "NowPlaying-artist-background-previews")
         self._local_music_settings = self._load_local_music_settings()
         self._local_music_library: Optional[Dict[str, Any]] = None
@@ -796,6 +898,109 @@ class Plugin:
                 shutil.rmtree(self._spotify_disk_cache_dir, ignore_errors=True)
         except Exception as exc:
             self._log(f"Spotify disk cache cleanup error: {exc}")
+
+    def _spotify_read_library_cache(self) -> Dict[str, Any]:
+        with self._spotify_library_cache_lock:
+            try:
+                if os.path.isfile(self._spotify_library_cache_path):
+                    with open(self._spotify_library_cache_path, "r", encoding="utf-8") as handle:
+                        value = json.load(handle)
+                    return value if isinstance(value, dict) else {}
+            except Exception as exc:
+                self._log(f"Spotify library cache read error: {exc}")
+            return {}
+
+    def _spotify_write_library_cache(self, section: str, payload: Any, complete: bool) -> None:
+        with self._spotify_library_cache_lock:
+            cache = self._spotify_read_library_cache()
+            cache[str(section)] = {
+                "complete": bool(complete),
+                "updated_at": time.time(),
+                "payload": payload,
+            }
+            try:
+                os.makedirs(os.path.dirname(self._spotify_library_cache_path), exist_ok=True)
+                temporary = self._spotify_library_cache_path + f".{os.getpid()}.tmp"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(cache, handle, ensure_ascii=False, separators=(",", ":"))
+                os.replace(temporary, self._spotify_library_cache_path)
+            except Exception as exc:
+                self._log(f"Spotify library cache write error: {exc}")
+
+    def _spotify_clear_library_cache(self) -> None:
+        with self._spotify_library_cache_lock:
+            try:
+                if os.path.isfile(self._spotify_library_cache_path):
+                    os.remove(self._spotify_library_cache_path)
+            except Exception as exc:
+                self._log(f"Spotify library cache cleanup error: {exc}")
+
+    def _spotify_invalidate_queue_cache(self) -> None:
+        with self._spotify_managed_queue_lock:
+            self._spotify_managed_queue = {
+                "uris": [],
+                "next_index": 0,
+                "chunk_end_uri": "",
+                "active": False,
+                "retry_at": 0.0,
+            }
+
+    def _spotify_begin_managed_queue(self, uris: List[str]) -> List[str]:
+        cleaned = [str(uri or "").strip() for uri in uris if str(uri or "").strip()]
+        chunk_size = max(20, int(self._spotify_managed_queue_chunk_size or 180))
+        first_chunk = cleaned[:chunk_size]
+        with self._spotify_managed_queue_lock:
+            self._spotify_managed_queue = {
+                "uris": cleaned,
+                "next_index": len(first_chunk),
+                "chunk_end_uri": first_chunk[-1] if first_chunk else "",
+                "active": bool(cleaned),
+                "retry_at": 0.0,
+            }
+        return first_chunk
+
+    def _spotify_continue_managed_queue_sync(self, bridge_snapshot: Dict[str, Any]) -> bool:
+        """Start the next bounded queue window only after the prior one ended.
+
+        Loading another window while a track is still active replaces the current
+        librespot context and audibly restarts playback. The previous draft did
+        exactly that whenever a transient snapshot was empty. Refill only after a
+        real ``Stopped`` event and only when the bridge still points at the last
+        URI of the window we supplied.
+        """
+        status = str((bridge_snapshot or {}).get("status") or "").strip().lower()
+        current_uri = str((bridge_snapshot or {}).get("uri") or "").strip()
+        if status != "stopped" or not current_uri:
+            return False
+        with self._spotify_managed_queue_lock:
+            state = dict(self._spotify_managed_queue)
+            uris = list(state.get("uris") or [])
+            next_index = int(state.get("next_index") or 0)
+            retry_at = float(state.get("retry_at") or 0.0)
+            chunk_end_uri = str(state.get("chunk_end_uri") or "")
+            if not state.get("active") or current_uri != chunk_end_uri or time.monotonic() < retry_at:
+                return False
+            if next_index >= len(uris):
+                self._spotify_managed_queue["active"] = False
+                return False
+            chunk_size = max(20, int(self._spotify_managed_queue_chunk_size or 180))
+            chunk = uris[next_index:next_index + chunk_size]
+        if not chunk:
+            self._spotify_invalidate_queue_cache()
+            return False
+        result = self._spotify_playback_bridge_request_sync(
+            "/action/load-tracks",
+            2.5,
+            {"uris": chunk, "start_index": 0},
+        )
+        with self._spotify_managed_queue_lock:
+            if result.get("ok"):
+                self._spotify_managed_queue["next_index"] = next_index + len(chunk)
+                self._spotify_managed_queue["chunk_end_uri"] = chunk[-1]
+                self._spotify_managed_queue["retry_at"] = 0.0
+                return True
+            self._spotify_managed_queue["retry_at"] = time.monotonic() + 2.0
+        return False
 
     def _resolve_runtime_dir(self) -> str:
         runtime_dir = getattr(decky_plugin, "DECKY_PLUGIN_RUNTIME_DIR", None)
@@ -919,7 +1124,13 @@ class Plugin:
         self.helper_dir = runtime_dir
         self.helper_path = os.path.join(runtime_dir, "MediaBridge.exe")
         self.thumbnail_bridge_path = os.path.join(runtime_dir, "ThumbnailBridge.exe")
-        self.app_volume_bridge_path = os.path.join(runtime_dir, "AppVolumeBridge.exe")
+        stale_volume_helper = os.path.join(runtime_dir, "AppVolumeBridge.exe")
+        if not os.path.isfile(self.bundled_app_volume_bridge_path) and os.path.isfile(stale_volume_helper):
+            try:
+                os.remove(stale_volume_helper)
+            except Exception as exc:
+                self._log(f"stale AppVolumeBridge cleanup error: {exc}")
+        self.app_volume_bridge_path = ""
 
     def _is_process_running(self, image_name: str) -> bool:
         if not self._is_windows():
@@ -990,7 +1201,12 @@ class Plugin:
                                     path = str(buffer.value or '').strip()
                             finally:
                                 kernel32.CloseHandle(handle)
-                    entries.append({"pid": process_id, "name": name, "path": path})
+                    entries.append({
+                        "pid": process_id,
+                        "parent_pid": int(entry.th32ParentProcessID or 0),
+                        "name": name,
+                        "path": path,
+                    })
                     entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
                     has_entry = bool(kernel32.Process32NextW(snapshot, ctypes.pointer(entry)))
             finally:
@@ -1017,7 +1233,13 @@ class Plugin:
             pass
         return None
 
-    def _launch_hidden_as_interactive_user(self, executable: str, arguments: List[str], cwd: str) -> Dict[str, Any]:
+    def _launch_hidden_as_interactive_user(
+        self,
+        executable: str,
+        arguments: List[str],
+        cwd: str,
+        visible: bool = False,
+    ) -> Dict[str, Any]:
         """Launch a helper in the same interactive Windows session as Steam.
 
         Decky can run its Python backend with a different/elevated token. GSMTC
@@ -1042,6 +1264,7 @@ class Plugin:
         CREATE_NO_WINDOW = 0x08000000
         STARTF_USESHOWWINDOW = 0x00000001
         SW_HIDE = 0
+        SW_SHOW = 5
 
         class STARTUPINFOW(ctypes.Structure):
             _fields_ = [
@@ -1120,11 +1343,12 @@ class Plugin:
                 startup.cb = ctypes.sizeof(STARTUPINFOW)
                 startup.lpDesktop = "winsta0\\default"
                 startup.dwFlags = STARTF_USESHOWWINDOW
-                startup.wShowWindow = SW_HIDE
+                startup.wShowWindow = SW_SHOW if visible else SW_HIDE
                 mutable_command = ctypes.create_unicode_buffer(command_line)
+                creation_flags = CREATE_UNICODE_ENVIRONMENT | (0 if visible else CREATE_NO_WINDOW)
                 created = advapi32.CreateProcessWithTokenW(
                     primary_token, LOGON_WITH_PROFILE, executable, mutable_command,
-                    CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, environment_pointer, cwd,
+                    creation_flags, environment_pointer, cwd,
                     ctypes.byref(startup), ctypes.byref(process_info),
                 )
                 if not created:
@@ -1238,7 +1462,7 @@ class Plugin:
                 settings["close_on_switch"] = bool(loaded.get("close_on_switch", settings["close_on_switch"]))
                 active_service = self._normalized_service_key(loaded.get("active_service", "localMusic"))
                 if active_service in {
-                    "localMusic", "spotify", "tidal", "appleMusic", "deezer", "amazonMusic", "soundCloud"
+                    "localMusic", "spotify", "youtubeMusic", "tidal", "appleMusic", "deezer", "amazonMusic", "soundCloud"
                 }:
                     settings["active_service"] = active_service
         except Exception:
@@ -1974,6 +2198,7 @@ class Plugin:
             stopped = self._stop_helper_unlocked(force=True, reason=reason)
             steps.append({"step": "stop_helpers", **stopped})
             if full:
+                self._youtube_music.cancel_browser_auth()
                 self._spotify_playback_bridge_stop_sync()
                 self._kill_named_process("AppVolumeBridge.exe")
                 self._kill_named_process("ThumbnailBridge.exe")
@@ -1990,7 +2215,12 @@ class Plugin:
                     steps.append({"step": "clear_preview_transport_cache", "ok": False, "error": str(exc)})
                 try:
                     if self._local_music_stream_server is None:
-                        self._local_music_stream_server = LocalMusicStreamServer(self._local_music_stream_path, self._local_music_stream_asset_path, self._log)
+                        self._local_music_stream_server = LocalMusicStreamServer(
+                            self._local_music_stream_path,
+                            self._local_music_stream_asset_path,
+                            self._log,
+                            self._youtube_music.resolve_stream,
+                        )
                         self._local_music_stream_server.start()
                     steps.append({"step": "verify_local_asset_server", "ok": bool(self._local_music_stream_server and self._local_music_stream_server.base_url), "baseUrl": self._local_music_stream_server.base_url if self._local_music_stream_server else ""})
                 except Exception as exc:
@@ -2189,6 +2419,9 @@ class Plugin:
             "spotify": "spotify",
             "spotifyplayer": "spotify",
             "spotifyplayeronly": "spotify",
+            "youtube": "youtubeMusic",
+            "youtubemusic": "youtubeMusic",
+            "ytmusic": "youtubeMusic",
             "tidal": "tidal",
             "apple": "appleMusic",
             "applemusic": "appleMusic",
@@ -2200,12 +2433,16 @@ class Plugin:
         return aliases.get(value, str(service or "music"))
 
     def _normalized_active_service(self) -> str:
-        value = re.sub(r"[^a-z0-9]+", "", str(self.active_service or "").lower())
+        active_service = getattr(self, "active_service", "localMusic")
+        value = re.sub(r"[^a-z0-9]+", "", str(active_service or "").lower())
         aliases = {
             "localmusic": "localMusic",
             "spotify": "spotify",
             "spotifyplayer": "spotify",
             "spotifyplayeronly": "spotify",
+            "youtube": "youtubeMusic",
+            "youtubemusic": "youtubeMusic",
+            "ytmusic": "youtubeMusic",
             "tidal": "tidal",
             "apple": "appleMusic",
             "applemusic": "appleMusic",
@@ -2214,7 +2451,7 @@ class Plugin:
             "amazonmusic": "amazonMusic",
             "soundcloud": "soundCloud",
         }
-        return aliases.get(value, str(self.active_service or "music"))
+        return aliases.get(value, str(active_service or "music"))
 
     def _media_player_match_score(self, player: Dict[str, Any], service: str) -> int:
         if not isinstance(player, dict):
@@ -2492,7 +2729,7 @@ class Plugin:
     def _normalize_snapshot_for_active_service(self, data: Dict[str, Any]) -> Dict[str, Any]:
         data = self._canonical_snapshot(data)
         service = self._normalized_active_service()
-        if service == "localMusic":
+        if service in {"localMusic", "youtubeMusic"}:
             return data
         players = [dict(value) for value in data.get("players", []) if isinstance(value, dict)]
         if not players:
@@ -2537,7 +2774,7 @@ class Plugin:
 
     def _select_active_media_session_sync(self) -> None:
         service = self._normalized_active_service()
-        if service == "localMusic":
+        if service in {"localMusic", "youtubeMusic"}:
             return
         try:
             data = self._request_json("/snapshot")
@@ -2676,6 +2913,8 @@ class Plugin:
         compact = re.sub(r"[^a-z0-9]+", "", text)
         if "localmusic" in compact:
             return "localMusic"
+        if "youtubemusic" in compact or "ytmusic" in compact:
+            return "youtubeMusic"
         if "spotify" in compact:
             return "spotify"
         if "tidal" in compact:
@@ -2708,7 +2947,7 @@ class Plugin:
             return comtypes, AudioUtilities
         except Exception as exc:
             if self._direct_volume_available is not False:
-                self._log(f"direct Core Audio unavailable, using helper fallback: {exc}")
+                self._log(f"direct Core Audio unavailable: {exc}")
             self._direct_volume_available = False
             return None
 
@@ -2767,8 +3006,7 @@ class Plugin:
                 "direct": True,
             }
         except Exception as exc:
-            # Clear a stale COM pointer once and let the existing helper handle the
-            # request. A later recovery or app change can retry direct mode.
+            # Clear a stale COM pointer. A later recovery or app change can retry.
             self._direct_volume_session = None
             self._direct_volume_session_key = ""
             self._direct_volume_session_at = 0.0
@@ -2974,7 +3212,7 @@ class Plugin:
         direct = self._run_app_volume_direct(volume, names)
         if isinstance(direct, dict) and direct.get("ok"):
             return direct
-        return self._run_app_volume_helper(volume, names)
+        return direct if isinstance(direct, dict) else {"ok": False, "volume": 100, "matched": "", "reason": "direct-core-audio-unavailable"}
 
     def _run_spotify_output_volume(self, volume: Optional[int] = None) -> Dict[str, Any]:
         if not self._is_windows():
@@ -3177,10 +3415,24 @@ class Plugin:
             except Exception:
                 pass
 
-    def _spotify_playback_bridge_http(self, path: str, port: int, secret: str, timeout: float = 1.5) -> Dict[str, Any]:
+    def _spotify_playback_bridge_http(
+        self,
+        path: str,
+        port: int,
+        secret: str,
+        timeout: float = 1.5,
+        body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        encoded = json.dumps(body).encode("utf-8") if isinstance(body, dict) else None
         request = urllib.request.Request(
             f"http://127.0.0.1:{int(port)}{path}",
-            headers={"X-Now-Playing-Token": secret, "Accept": "application/json"},
+            data=encoded,
+            headers={
+                "X-Now-Playing-Token": secret,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST" if encoded is not None else "GET",
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -3274,8 +3526,8 @@ class Plugin:
                 self._spotify_playback_bridge_error = "Spotify playback helper pipes are unavailable"
                 self._spotify_playback_bridge_retry_at = now + 30.0
                 return False
-            # Keep Spotify Connect's internal mixer at full scale. The user-facing
-            # slider controls the bridge's dedicated Windows Core Audio session.
+            # The integrated soft mixer is the user-facing volume authority. This
+            # avoids Windows-session races and behaves like the local music player.
             initial_volume = clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
             audio_quality = int(self.spotify_settings.get("audio_quality", 320) or 320)
             if audio_quality not in {96, 160, 320}:
@@ -3288,6 +3540,7 @@ class Plugin:
                 "initialVolume": initial_volume,
                 "audioQuality": audio_quality,
                 "audioCachePath": audio_cache_path,
+                "audioCacheSizeBytes": SPOTIFY_AUDIO_CACHE_LIMIT_BYTES,
             }) + "\n")
             process.stdin.flush()
             process.stdin.close()
@@ -3339,14 +3592,39 @@ class Plugin:
                 ).start()
             return True
 
-    def _spotify_playback_bridge_request_sync(self, path: str, timeout: float = 1.5) -> Dict[str, Any]:
-        if not self._spotify_playback_bridge_start_sync():
+    def _spotify_playback_bridge_start_with_recovery_sync(self) -> bool:
+        if self._spotify_playback_bridge_start_sync():
+            return True
+        first_error = self._spotify_playback_bridge_error
+        # Do not spin on configuration failures that require user action.
+        if "Reconnect Spotify" in first_error or "not connected" in first_error or "missing" in first_error:
+            return False
+        try:
+            self._spotify_playback_bridge_stop_sync()
+            self._spotify_playback_bridge_retry_at = 0.0
+            self._spotify_access_token(True)
+            time.sleep(0.15)
+            recovered = self._spotify_playback_bridge_start_sync()
+            if recovered:
+                self._record_diagnostic_event("spotify", "playback_bridge_recovered", {"previousError": first_error})
+            return recovered
+        except Exception as exc:
+            self._spotify_playback_bridge_error = str(exc or first_error)
+            return False
+
+    def _spotify_playback_bridge_request_sync(
+        self,
+        path: str,
+        timeout: float = 1.5,
+        body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not self._spotify_playback_bridge_start_with_recovery_sync():
             return {}
         with self._spotify_playback_bridge_lock:
             port = self._spotify_playback_bridge_port
             secret = self._spotify_playback_bridge_secret
         try:
-            return self._spotify_playback_bridge_http(path, port, secret, timeout)
+            return self._spotify_playback_bridge_http(path, port, secret, timeout, body)
         except Exception as exc:
             self._spotify_playback_bridge_error = str(exc)
             return {}
@@ -3381,6 +3659,7 @@ class Plugin:
             "repeatMode": str(payload.get("repeatMode") or "Off"),
             "artworkUrl": str(payload.get("artworkUrl") or ""),
             "volume": clamp_value(payload.get("volume"), 0, 100),
+            "audioLevel": max(0.0, min(1.0, float(payload.get("audioLevel") or 0.0))),
         }
         return {"selectedPlayer": player["id"], "currentPlayer": player["id"], "selected": player, "players": [player]}
 
@@ -3434,6 +3713,33 @@ class Plugin:
                 self._spotify_control_override_until = 0.0
         return result
 
+    def _spotify_pause_for_source_switch_sync(self) -> bool:
+        """Pause Spotify deterministically before another source becomes active."""
+        self._spotify_invalidate_queue_cache()
+        snapshot = self._spotify_playback_bridge_request_sync("/snapshot", 1.0)
+        if snapshot.get("ready"):
+            if str(snapshot.get("status") or "").strip().lower() == "playing":
+                result = self._spotify_playback_bridge_request_sync("/action/pause", 1.0)
+                if not result.get("ok"):
+                    return False
+                for _ in range(4):
+                    time.sleep(0.06)
+                    verify = self._spotify_playback_bridge_request_sync("/snapshot", 0.8)
+                    if str(verify.get("status") or "").strip().lower() != "playing":
+                        break
+            self._spotify_set_control_override(is_playing=False)
+            self._spotify_patch_playback_cache(is_playing=False)
+            return True
+        try:
+            state = self._spotify_playback_state_sync(0.0, 0.0)
+            if state.get("is_playing"):
+                device_id = str((state.get("device") or {}).get("id") or "")
+                params = {"device_id": device_id} if device_id else None
+                self._spotify_api_sync("/me/player/pause", method="PUT", params=params)
+            return True
+        except Exception:
+            return False
+
     def _spotify_set_control_override(self, **changes: Any) -> None:
         with self._spotify_control_override_lock:
             self._spotify_control_override.update(changes)
@@ -3478,9 +3784,31 @@ class Plugin:
         }
         return {"selectedPlayer": "spotify-api", "currentPlayer": "spotify-api", "selected": player, "players": [player]}
 
+    async def get_spotify_audio_level(self) -> Dict[str, Any]:
+        """Lightweight live PCM level for the fullscreen visualizers.
+
+        The bridge refreshes its RMS meter every 32 ms; the frontend polls this
+        method at a visual rate instead of pulling the whole snapshot.
+        """
+        try:
+            payload = await self._run_in_executor(
+                self._spotify_executor,
+                self._spotify_playback_bridge_request_sync,
+                "/snapshot",
+                0.5,
+            )
+            if isinstance(payload, dict) and payload.get("ready"):
+                return {
+                    "level": max(0.0, min(1.0, float(payload.get("audioLevel") or 0.0))),
+                    "playing": str(payload.get("status") or "").strip().lower() == "playing",
+                }
+        except Exception:
+            pass
+        return {"level": -1.0, "playing": False}
+
     async def get_snapshot(self) -> Dict[str, Any]:
         active = self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             return await self._run_in_executor(self._realtime_executor, self._local_music_snapshot_sync)
         if active == "spotify" and bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")):
             try:
@@ -3493,7 +3821,13 @@ class Plugin:
                 bridge_snapshot = self._spotify_snapshot_from_bridge(bridge_payload)
                 if bridge_snapshot.get("players"):
                     return bridge_snapshot
-                payload = await self._run_in_executor(self._spotify_executor, self._spotify_playback_state_sync, 4.5, 10.0)
+                # A ready bridge is authoritative even while metadata is briefly
+                # empty during a track transition. Falling through here used to
+                # call /me/player repeatedly, waste quota and reintroduce stale
+                # artwork from the previous API sample.
+                if bool(bridge_payload.get("ready")):
+                    return bridge_snapshot
+                payload = await self._run_in_executor(self._spotify_executor, self._spotify_playback_state_sync, 10.0, 30.0)
                 return self._spotify_snapshot_from_playback(payload)
             except Exception as exc:
                 self._log(f"Spotify API snapshot unavailable: {exc}")
@@ -3757,7 +4091,7 @@ class Plugin:
 
     async def play_pause(self) -> str:
         active = self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             result = await self.local_music_command("play_pause")
             return "true" if result.get("ok") else "false"
         if active == "spotify":
@@ -3767,7 +4101,7 @@ class Plugin:
 
     async def next(self) -> str:
         active = self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             result = await self.local_music_command("next")
             return "true" if result.get("ok") else "false"
         if active == "spotify":
@@ -3777,7 +4111,7 @@ class Plugin:
 
     async def previous(self) -> str:
         active = self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             result = await self.local_music_command("previous")
             return "true" if result.get("ok") else "false"
         if active == "spotify":
@@ -3803,6 +4137,9 @@ class Plugin:
             self._log(f"open_spotify_player error: {exc}")
             return "false"
 
+    async def open_youtube_music(self) -> str:
+        return "true"
+
     async def open_tidal(self) -> str:
         return await self._open_music_app("tidal")
 
@@ -3820,7 +4157,7 @@ class Plugin:
 
     async def shuffle(self) -> str:
         active = self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             result = await self.local_music_command("shuffle")
             return "true" if result.get("ok") else "false"
         if active == "spotify":
@@ -3830,7 +4167,7 @@ class Plugin:
 
     async def repeat(self) -> str:
         active = self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             result = await self.local_music_command("repeat")
             return "true" if result.get("ok") else "false"
         if active == "spotify":
@@ -3840,20 +4177,19 @@ class Plugin:
 
     async def get_app_volume(self, service: str = "") -> Dict[str, Any]:
         active = self._normalized_service_key(service) if service else self._normalized_active_service()
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             state = self._local_music_frontend_state if isinstance(self._local_music_frontend_state, dict) else {}
-            return {"ok": True, "volume": clamp_value(state.get("volume", 100), 0, 100), "matched": "localMusic"}
+            return {"ok": True, "volume": clamp_value(state.get("volume", 100), 0, 100), "matched": active}
         if active == "spotify":
             def get_spotify_volume() -> Dict[str, Any]:
-                result = self._run_spotify_output_volume(None)
-                if result.get("ok"):
+                result = self._spotify_playback_bridge_request_sync("/snapshot", 0.8)
+                if result.get("ready"):
                     volume = clamp_value(result.get("volume", self.spotify_settings.get("connect_volume", 100)), 0, 100)
                     self.spotify_settings["connect_volume"] = volume
-                    origin = "spotify-connect" if time.monotonic() - self._spotify_connect_volume_changed_at <= 4.0 else "windows-mixer"
-                    return {**result, "ok": True, "volume": volume, "transport": "windows-mixer", "origin": origin}
+                    return {"ok": True, "volume": volume, "matched": "SpotifyPlaybackBridge.exe", "transport": "integrated", "origin": "spotify-connect"}
                 volume = clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
                 return {"ok": True, "volume": volume, "matched": "SpotifyPlaybackBridge.exe", "transport": "saved", "origin": "saved"}
-            return await self._run_in_executor(self._volume_executor, get_spotify_volume)
+            return await self._run_in_executor(self._spotify_executor, get_spotify_volume)
         return await self._run_in_executor(self._volume_executor, self._run_app_volume, None)
 
     async def set_app_volume(self, volume: int, service: str = "", revision: int = 0) -> Dict[str, Any]:
@@ -3876,7 +4212,7 @@ class Plugin:
         def stale_result() -> Dict[str, Any]:
             return {"ok": True, "stale": True, "volume": requested, "matched": request_key}
 
-        if active == "localMusic":
+        if active in {"localMusic", "youtubeMusic"}:
             if not request_is_current():
                 return stale_result()
             return await self.set_local_music_volume(requested)
@@ -3886,16 +4222,21 @@ class Plugin:
                     return stale_result()
                 self.spotify_settings["connect_volume"] = requested
                 self._save_spotify_settings()
-                result = self._run_spotify_output_volume(requested)
+                result = self._spotify_playback_bridge_request_sync(
+                    "/action/volume?" + urllib.parse.urlencode({"value": requested}),
+                    0.8,
+                )
                 if not result.get("ok"):
-                    return {**result, "ok": False, "volume": requested, "matched": "SpotifyPlaybackBridge.exe", "transport": "windows-mixer"}
+                    # Keep the requested value. It becomes initialVolume when the
+                    # background bridge next starts, without snapping the UI back.
+                    return {"ok": True, "volume": requested, "matched": "SpotifyPlaybackBridge.exe", "transport": "saved", "deferred": True}
                 return {
-                    **result,
                     "ok": True,
-                    "volume": clamp_value(result.get("volume", requested), 0, 100),
-                    "transport": "windows-mixer",
+                    "volume": requested,
+                    "matched": "SpotifyPlaybackBridge.exe",
+                    "transport": "integrated",
                 }
-            return await self._run_in_executor(self._volume_executor, set_spotify_volume)
+            return await self._run_in_executor(self._spotify_executor, set_spotify_volume)
 
         def set_external_volume() -> Dict[str, Any]:
             if not request_is_current():
@@ -4379,12 +4720,25 @@ class Plugin:
         # up the legacy Windows Media Player COM worker merely to read state;
         # doing so creates an unnecessary hidden player and extra resources.
         state = dict(self._local_music_frontend_state) if isinstance(self._local_music_frontend_state, dict) else {}
+        source_key = self._normalized_service_key(state.get("sourceKey") or self._normalized_active_service())
+        if source_key not in {"localMusic", "youtubeMusic"}:
+            source_key = "localMusic"
+        source_name = "YouTube Music" if source_key == "youtubeMusic" else "Your Music"
         track = state.get("track") if isinstance(state, dict) else None
         if not isinstance(track, dict):
-            return {"selectedPlayer": "localMusic", "currentPlayer": "localMusic", "selected": None, "players": []}
+            return {"selectedPlayer": source_key, "currentPlayer": source_key, "selected": None, "players": []}
+        images = track.get("images") if isinstance(track.get("images"), list) else []
+        album = track.get("album") if isinstance(track.get("album"), dict) else {}
+        if not images and isinstance(album.get("images"), list):
+            images = album.get("images")
+        artwork_url = ""
+        for image in reversed(images):
+            if isinstance(image, dict) and str(image.get("url") or "").strip():
+                artwork_url = str(image.get("url") or "").strip()
+                break
         player = {
-            "id": "localMusic",
-            "name": "La tua musica",
+            "id": source_key,
+            "name": source_name,
             "title": str(track.get("name") or ""),
             "artist": ", ".join(str(item.get("name") or "") for item in track.get("artists", []) if isinstance(item, dict)),
             "album": str((track.get("album") or {}).get("name") or ""),
@@ -4404,8 +4758,9 @@ class Plugin:
             "repeatMode": str(state.get("repeatMode") or "None"),
             "localTrackId": str(track.get("id") or ""),
             "coverId": str(track.get("coverId") or ""),
+            "artworkUrl": artwork_url,
         }
-        return {"selectedPlayer": "localMusic", "currentPlayer": "localMusic", "selected": player, "players": [player]}
+        return {"selectedPlayer": source_key, "currentPlayer": source_key, "selected": player, "players": [player]}
 
     async def set_active_service(self, service: str) -> str:
         next_service = self._normalized_service_key(service) or "localMusic"
@@ -4436,14 +4791,17 @@ class Plugin:
             next_app_key = self._music_app_key_for_service(next_service)
             same_underlying_app = bool(previous_app_key and previous_app_key == next_app_key)
 
-            if source_changed and previous_service != "localMusic" and not same_underlying_app:
+            if source_changed and previous_service not in {"localMusic", "youtubeMusic"} and not same_underlying_app:
                 try:
                     spotify_ready = previous_service == "spotify" and bool(self.spotify_settings.get("enabled")) and bool(
                         self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")
                     )
                     if spotify_ready:
-                        result = await self.spotify_player_command("pause")
-                        if not result.get("ok"):
+                        paused = await self._run_in_executor(
+                            self._spotify_executor,
+                            self._spotify_pause_for_source_switch_sync,
+                        )
+                        if not paused:
                             await self.pause_external_playback()
                     else:
                         await self.pause_external_playback()
@@ -4484,7 +4842,7 @@ class Plugin:
                 except Exception as exc:
                     self._log(f"source switch launch error for {next_app_key}: {exc}")
 
-            if self._normalized_active_service() not in {"localMusic", "spotify"}:
+            if self._normalized_active_service() not in {"localMusic", "youtubeMusic", "spotify"}:
                 try:
                     await self._run_in_executor(self._realtime_executor, self._select_active_media_session_sync)
                 except Exception:
@@ -4774,11 +5132,15 @@ class Plugin:
             return self._local_music_cover_path(resource_id)
         if kind == "artist":
             return self._local_music_artist_profile_path(resource_id)
-        if kind in {"background", "spotify-background"}:
+        if kind in {"background", "spotify-background", "youtubemusic-background"}:
             safe_id = re.sub(r"[^A-Za-z0-9]", "", str(resource_id or ""))
             if not safe_id:
                 return ""
-            folder = self.local_music_artist_background_dir if kind == "background" else self.spotify_artist_background_dir
+            folder = (
+                self.spotify_artist_background_dir if kind == "spotify-background"
+                else self.youtube_music_artist_background_dir if kind == "youtubemusic-background"
+                else self.local_music_artist_background_dir
+            )
             for extension in ("jpg", "jpeg", "png", "webp", "avif", "gif"):
                 candidate = os.path.join(folder, f"{safe_id}.{extension}")
                 if os.path.isfile(candidate):
@@ -5067,6 +5429,7 @@ class Plugin:
             "repeatMode": str(state.get("repeatMode") or "None"),
             "canPrevious": bool(state.get("canPrevious", False)),
             "canNext": bool(state.get("canNext", False)),
+            "sourceKey": self._normalized_service_key(state.get("sourceKey") or self._normalized_active_service()),
         }
         self._local_music_frontend_state = allowed
         # The explicit source selector is authoritative. A delayed browser-audio
@@ -5081,9 +5444,156 @@ class Plugin:
 
     async def get_local_music_stream_base(self) -> str:
         if self._local_music_stream_server is None:
-            self._local_music_stream_server = LocalMusicStreamServer(self._local_music_stream_path, self._local_music_stream_asset_path, self._log)
+            self._local_music_stream_server = LocalMusicStreamServer(
+                self._local_music_stream_path,
+                self._local_music_stream_asset_path,
+                self._log,
+                self._youtube_music.resolve_stream,
+            )
             self._local_music_stream_server.start()
         return self._local_music_stream_server.base_url
+
+    async def get_youtube_music_settings(self) -> Dict[str, Any]:
+        return self._youtube_music.public_settings()
+
+    async def connect_youtube_music(self, headers_raw: str) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(
+                self._youtube_music_executor,
+                self._youtube_music.connect,
+                str(headers_raw or ""),
+            )
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            self._log(f"YouTube Music authentication error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    async def start_youtube_music_browser_auth(self) -> Dict[str, Any]:
+        try:
+            data = self._youtube_music.start_browser_auth()
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            self._log(f"YouTube Music browser authentication start error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    async def get_youtube_music_browser_auth_status(self) -> Dict[str, Any]:
+        try:
+            return {"ok": True, "data": self._youtube_music.browser_auth_status()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def cancel_youtube_music_browser_auth(self) -> Dict[str, Any]:
+        try:
+            return {"ok": True, "data": self._youtube_music.cancel_browser_auth()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def disconnect_youtube_music(self) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(self._youtube_music_executor, self._youtube_music.disconnect)
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def set_youtube_music_audio_quality(self, quality: str) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(
+                self._youtube_music_executor,
+                self._youtube_music.set_audio_quality,
+                quality,
+            )
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def set_youtube_music_compact_saved_tracks(self, enabled: bool) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(
+                self._youtube_music_executor,
+                self._youtube_music.set_compact_saved_tracks,
+                bool(enabled),
+            )
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def refresh_youtube_music_cache(self) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(self._youtube_music_executor, self._youtube_music.clear_cache)
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def youtube_music_get_home(self) -> Dict[str, Any]:
+        return await self._youtube_music_result(self._youtube_music.get_home)
+
+    async def youtube_music_search(self, query: str) -> Dict[str, Any]:
+        return await self._youtube_music_result(self._youtube_music.search, query)
+
+    async def youtube_music_get_library(self, section: str, max_items: int = 100) -> Dict[str, Any]:
+        return await self._youtube_music_result(self._youtube_music.get_library, section, max_items)
+
+    async def youtube_music_get_detail(self, kind: str, item_id: str) -> Dict[str, Any]:
+        return await self._youtube_music_result(self._youtube_music.get_detail, kind, item_id)
+
+    async def youtube_music_prepare_stream(self, video_id: str) -> Dict[str, Any]:
+        try:
+            stream = await self._run_in_executor(
+                self._youtube_music_executor,
+                self._youtube_music.resolve_stream,
+                video_id,
+            )
+            base = await self.get_local_music_stream_base()
+            clean_id = re.sub(r"[^A-Za-z0-9_-]", "", str(video_id or ""))[:32]
+            return {
+                "ok": True,
+                "data": {
+                    "url": f"{base}/ytmusic-track/{urllib.parse.quote(clean_id, safe='')}",
+                    "durationMs": int(stream.get("durationMs") or 0),
+                    "title": str(stream.get("title") or ""),
+                    "artist": str(stream.get("artist") or ""),
+                    "album": str(stream.get("album") or ""),
+                    "thumbnail": str(stream.get("thumbnail") or ""),
+                },
+            }
+        except Exception as exc:
+            self._log(f"YouTube Music stream prepare error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    async def youtube_music_prefetch_stream(self, video_id: str) -> Dict[str, Any]:
+        # Warm the stream cache on a dedicated single-worker executor so prefetch
+        # never competes with on-demand playback resolution (the reason a 6-track
+        # prefetch made selecting/advancing slower).
+        try:
+            await self._run_in_executor(
+                self._youtube_music_prefetch_executor,
+                self._youtube_music.resolve_stream,
+                video_id,
+            )
+            return {"ok": True}
+        except Exception as exc:
+            self._log(f"YouTube Music stream prefetch error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    async def youtube_music_invalidate_stream(self, video_id: str) -> Dict[str, Any]:
+        try:
+            removed = await self._run_in_executor(
+                self._youtube_music_executor,
+                self._youtube_music.invalidate_stream,
+                video_id,
+            )
+            return {"ok": True, "data": {"removed": int(removed or 0)}}
+        except Exception as exc:
+            self._log(f"YouTube Music stream invalidate error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    async def _youtube_music_result(self, function, *args: Any) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(self._youtube_music_executor, function, *args)
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            self._log(f"YouTube Music request error: {exc}")
+            return {"ok": False, "error": str(exc)}
 
     async def get_local_music_track(self, track_id: str) -> Dict[str, Any]:
         track = self._local_music_track_map().get(str(track_id or ""))
@@ -5310,9 +5820,54 @@ class Plugin:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def _spotify_audio_cache_stats_sync(self) -> Dict[str, Any]:
+        cache_root = os.path.abspath(os.path.join(self.spotify_settings_dir, "spotify-audio-cache"))
+        total = 0
+        files = 0
+        if os.path.isdir(cache_root):
+            for root, _, names in os.walk(cache_root):
+                for name in names:
+                    try:
+                        total += int(os.path.getsize(os.path.join(root, name)))
+                        files += 1
+                    except Exception:
+                        pass
+        return {"bytes": total, "files": files, "limitBytes": SPOTIFY_AUDIO_CACHE_LIMIT_BYTES}
+
+    async def get_spotify_audio_cache_stats(self) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(self._spotify_executor, self._spotify_audio_cache_stats_sync)
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def get_spotify_api_usage(self) -> Dict[str, Any]:
+        # Reports live Web API usage from in-memory counters. Makes no network
+        # request itself, so polling this never consumes API quota.
+        now = time.time()
+        with self._spotify_request_lock:
+            recent = [t for t in self._spotify_api_call_times if now - t <= 60.0]
+            self._spotify_api_call_times = recent
+            total = int(self._spotify_api_call_total)
+            per_minute = len(recent)
+        try:
+            status = self._spotify_rate_limit_status_sync()
+        except Exception:
+            status = {}
+        return {
+            "ok": True,
+            "data": {
+                "total": total,
+                "perMinute": per_minute,
+                "rateLimited": bool(status.get("active")),
+                "remainingSeconds": int(status.get("remainingSeconds", 0) or 0),
+            },
+        }
+
     async def refresh_spotify_cache(self) -> Dict[str, Any]:
         self._spotify_clear_api_cache()
         self._spotify_clear_disk_cache()
+        self._spotify_clear_library_cache()
         self._spotify_invalidate_queue_cache()
         return {"ok": True}
 
@@ -5330,6 +5885,8 @@ class Plugin:
             self._spotify_rate_limit_until = 0.0
             self._spotify_clear_api_cache()
             self._spotify_clear_disk_cache()
+            self._spotify_clear_library_cache()
+            self._spotify_invalidate_queue_cache()
         self._save_spotify_settings()
         return self._spotify_public_settings()
 
@@ -5340,7 +5897,24 @@ class Plugin:
         challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
         return verifier, challenge
 
-    def _browser_window_handles(self) -> List[int]:
+    def _process_tree_ids_native(self, root_process_id: int) -> Set[int]:
+        root = int(root_process_id or 0)
+        if root <= 0:
+            return set()
+        process_ids = {root}
+        entries = self._native_process_entries()
+        changed = True
+        while changed:
+            changed = False
+            for item in entries:
+                process_id = int(item.get("pid") or 0)
+                parent_id = int(item.get("parent_pid") or 0)
+                if process_id > 0 and parent_id in process_ids and process_id not in process_ids:
+                    process_ids.add(process_id)
+                    changed = True
+        return process_ids
+
+    def _browser_window_handles(self, process_ids: Optional[Set[int]] = None) -> List[int]:
         if not self._is_windows():
             return []
         handles: List[int] = []
@@ -5356,7 +5930,10 @@ class Plugin:
                 user32.GetClassNameW(window_handle, class_name, len(class_name))
                 value = class_name.value
                 if value.startswith("Chrome_WidgetWin_") or value in {"MozillaWindowClass", "ApplicationFrameWindow"}:
-                    handles.append(int(window_handle))
+                    window_process_id = ctypes.c_ulong(0)
+                    user32.GetWindowThreadProcessId(window_handle, ctypes.byref(window_process_id))
+                    if not process_ids or int(window_process_id.value or 0) in process_ids:
+                        handles.append(int(window_handle))
                 return True
 
             user32.EnumWindows(enum_window, 0)
@@ -5364,7 +5941,7 @@ class Plugin:
             self._log(f"browser window enumeration error: {exc}")
         return handles
 
-    def _focus_browser_window(self, previous_handles: Set[int]) -> None:
+    def _focus_browser_window(self, previous_handles: Set[int], launched_process_id: int = 0) -> None:
         if not self._is_windows():
             return
         try:
@@ -5372,28 +5949,50 @@ class Plugin:
             kernel32 = ctypes.windll.kernel32
             target = 0
             for _ in range(24):
-                handles = self._browser_window_handles()
+                process_ids = self._process_tree_ids_native(launched_process_id) if launched_process_id else set()
+                handles = self._browser_window_handles(process_ids) if process_ids else []
+                if not handles:
+                    handles = self._browser_window_handles()
                 fresh = [handle for handle in handles if handle not in previous_handles]
                 if fresh or handles:
                     target = (fresh or handles)[0]
-                    if fresh:
+                    if fresh or process_ids:
                         break
                 time.sleep(0.125)
             if not target:
                 return
+            user32.SetWindowPos.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            user32.SetWindowPos.restype = ctypes.c_int
+            try:
+                user32.AllowSetForegroundWindow(0xFFFFFFFF)
+            except Exception:
+                pass
             foreground = int(user32.GetForegroundWindow() or 0)
             current_thread = int(kernel32.GetCurrentThreadId())
             foreground_thread = int(user32.GetWindowThreadProcessId(foreground, None)) if foreground else 0
-            attached = bool(foreground_thread and foreground_thread != current_thread and user32.AttachThreadInput(current_thread, foreground_thread, True))
+            target_thread = int(user32.GetWindowThreadProcessId(target, None))
+            attached_foreground = bool(foreground_thread and foreground_thread != current_thread and user32.AttachThreadInput(current_thread, foreground_thread, True))
+            attached_target = bool(target_thread and target_thread != current_thread and target_thread != foreground_thread and user32.AttachThreadInput(current_thread, target_thread, True))
             try:
                 user32.ShowWindow(target, 9)
+                user32.SetWindowPos(target, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
                 user32.BringWindowToTop(target)
                 user32.keybd_event(0x12, 0, 0, 0)
                 user32.keybd_event(0x12, 0, 2, 0)
                 user32.SetForegroundWindow(target)
                 user32.SetActiveWindow(target)
+                if hasattr(user32, "SwitchToThisWindow"):
+                    user32.SwitchToThisWindow(target, True)
+                time.sleep(0.12)
+                user32.SetWindowPos(target, ctypes.c_void_p(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
             finally:
-                if attached:
+                if attached_target:
+                    user32.AttachThreadInput(current_thread, target_thread, False)
+                if attached_foreground:
                     user32.AttachThreadInput(current_thread, foreground_thread, False)
         except Exception as exc:
             self._log(f"browser foreground error: {exc}")
@@ -5421,6 +6020,108 @@ class Plugin:
         except Exception as exc:
             self._log(f"external URL browser open error: {exc}")
             return False
+
+    def _shell_execute_visible(self, executable: str, arguments: List[str], cwd: str) -> Dict[str, Any]:
+        if not self._is_windows():
+            return {"ok": False, "error": "Windows only"}
+
+        class SHELLEXECUTEINFOW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("fMask", ctypes.c_ulong),
+                ("hwnd", ctypes.c_void_p),
+                ("lpVerb", ctypes.c_wchar_p),
+                ("lpFile", ctypes.c_wchar_p),
+                ("lpParameters", ctypes.c_wchar_p),
+                ("lpDirectory", ctypes.c_wchar_p),
+                ("nShow", ctypes.c_int),
+                ("hInstApp", ctypes.c_void_p),
+                ("lpIDList", ctypes.c_void_p),
+                ("lpClass", ctypes.c_wchar_p),
+                ("hkeyClass", ctypes.c_void_p),
+                ("dwHotKey", ctypes.c_ulong),
+                ("hIconOrMonitor", ctypes.c_void_p),
+                ("hProcess", ctypes.c_void_p),
+            ]
+
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+        shell32.ShellExecuteExW.restype = ctypes.c_int
+        kernel32.GetProcessId.argtypes = [ctypes.c_void_p]
+        kernel32.GetProcessId.restype = ctypes.c_ulong
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+
+        info = SHELLEXECUTEINFOW()
+        info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
+        info.fMask = 0x00000040 | 0x00000100  # SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+        info.lpVerb = "open"
+        info.lpFile = executable
+        info.lpParameters = subprocess.list2cmdline(arguments)
+        info.lpDirectory = cwd
+        info.nShow = 5  # SW_SHOW
+        if not shell32.ShellExecuteExW(ctypes.byref(info)):
+            return {"ok": False, "error": f"ShellExecuteExW failed: {ctypes.WinError(ctypes.get_last_error())}"}
+        try:
+            process_id = int(kernel32.GetProcessId(info.hProcess) or 0) if info.hProcess else 0
+        finally:
+            if info.hProcess:
+                kernel32.CloseHandle(info.hProcess)
+        if process_id <= 0:
+            return {"ok": False, "error": "ShellExecuteExW did not return a browser process"}
+        return {
+            "ok": True,
+            "pid": process_id,
+            "mode": "shell-interactive",
+            "sessionId": self._process_session_id(process_id),
+        }
+
+    def _launch_youtube_music_auth_browser(self, executable: str, arguments: List[str], cwd: str) -> Dict[str, Any]:
+        previous_handles = set(self._browser_window_handles())
+        launched = self._shell_execute_visible(executable, arguments, cwd)
+        errors: List[str] = []
+        if not launched.get("ok"):
+            errors.append(str(launched.get("error") or "shell launch failed"))
+            try:
+                creation_flags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
+                process = subprocess.Popen(
+                    [executable, *arguments],
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creation_flags,
+                    close_fds=True,
+                )
+                launched = {
+                    "ok": True,
+                    "pid": int(process.pid or 0),
+                    "mode": "direct-interactive",
+                    "sessionId": self._process_session_id(os.getpid()),
+                }
+            except Exception as exc:
+                errors.append(f"direct launch: {type(exc).__name__}: {exc}")
+                launched = self._launch_hidden_as_interactive_user(executable, arguments, cwd, visible=True)
+                if not launched.get("ok"):
+                    errors.append(str(launched.get("error") or "interactive-token launch failed"))
+                    launched["error"] = " | ".join(errors)
+        if launched.get("ok"):
+            launched_pid = int(launched.get("pid") or 0)
+            self._record_diagnostic_event(
+                "youtube_music",
+                "browser_auth_launch",
+                {"pid": launched_pid, "mode": launched.get("mode"), "sessionId": launched.get("sessionId")},
+            )
+            time.sleep(0.18)
+            process_ids = self._process_tree_ids_native(launched_pid)
+            foreground_process_id = ctypes.c_ulong(0)
+            foreground_window = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+            if foreground_window:
+                ctypes.windll.user32.GetWindowThreadProcessId(foreground_window, ctypes.byref(foreground_process_id))
+            if int(foreground_process_id.value or 0) not in process_ids:
+                self._focus_browser_window(previous_handles, launched_pid)
+        return launched
 
     def _spotify_open_url(self, url: str) -> None:
         self._open_external_url_sync(url)
@@ -5637,6 +6338,8 @@ class Plugin:
         self._spotify_rate_limit_until = 0.0
         self._spotify_clear_api_cache()
         self._spotify_clear_disk_cache()
+        self._spotify_clear_library_cache()
+        self._spotify_invalidate_queue_cache()
         self._save_spotify_settings()
         with self._spotify_auth_lock:
             self._spotify_auth_status = {"state": "idle", "message": ""}
@@ -5978,6 +6681,11 @@ class Plugin:
             if body is not None:
                 headers["Content-Type"] = "application/json"
             request = urllib.request.Request(url, data=encoded_body, method=method, headers=headers)
+            now_call = time.time()
+            self._spotify_api_call_total += 1
+            self._spotify_api_call_times.append(now_call)
+            if len(self._spotify_api_call_times) > 600:
+                self._spotify_api_call_times = [t for t in self._spotify_api_call_times if now_call - t <= 60.0]
             try:
                 with urllib.request.urlopen(request, timeout=12.0) as response:
                     self._spotify_last_request_at = time.monotonic()
@@ -6491,11 +7199,27 @@ class Plugin:
         if section not in {"tracks", "albums", "playlists", "artists"}:
             return {"ok": False, "error": "Unknown Spotify library section"}
         requested_value = int(max_items if max_items is not None else 300)
-        unlimited_private_section = section in {"albums", "playlists", "artists"} and requested_value <= 0
+        # A request of <= 0 means "load everything" for any private section, so the
+        # user can see and play their entire saved-tracks library (not just 50).
+        unlimited_private_section = section in {"tracks", "albums", "playlists", "artists"} and requested_value <= 0
         requested_items = 0 if unlimited_private_section else max(1, min(100, requested_value or 100))
 
         def work() -> Any:
             self._spotify_require_ready()
+            cached_sections = self._spotify_read_library_cache()
+            cached_entry = cached_sections.get(section) if isinstance(cached_sections, dict) else None
+            if isinstance(cached_entry, dict) and isinstance(cached_entry.get("payload"), dict):
+                cached_payload = copy.deepcopy(cached_entry.get("payload"))
+                cached_complete = bool(cached_entry.get("complete"))
+                if unlimited_private_section and cached_complete:
+                    return cached_payload
+                if not unlimited_private_section:
+                    key = "artists" if section == "artists" else "items"
+                    container = cached_payload.get("artists") if section == "artists" else cached_payload
+                    if isinstance(container, dict) and isinstance(container.get("items"), list):
+                        container["items"] = container["items"][:requested_items]
+                        container["limit"] = len(container["items"])
+                        return cached_payload
             if section == "artists":
                 payload = self._spotify_collect_followed_artists(requested_items, 21600)
                 artists = payload.get("artists", {}) if isinstance(payload, dict) else {}
@@ -6504,6 +7228,7 @@ class Plugin:
                         artists.get("items", []) if isinstance(artists.get("items"), list) else [],
                         key=lambda item: self._spotify_alpha_key(item.get("name", "")) if isinstance(item, dict) else "",
                     )
+                self._spotify_write_library_cache(section, payload, unlimited_private_section)
                 return payload
             path = {
                 "tracks": "/me/tracks",
@@ -6522,6 +7247,7 @@ class Plugin:
                     key=lambda entry: self._spotify_alpha_key((entry.get("album") or {}).get("name", ""))
                     if isinstance(entry, dict) and isinstance(entry.get("album"), dict) else "",
                 )
+            self._spotify_write_library_cache(section, payload, unlimited_private_section)
             return payload
 
         try:
@@ -6579,8 +7305,37 @@ class Plugin:
         except Exception as exc:
             self._log(f"Artist background selections save error: {exc}")
 
+    def _artist_background_provider_key(self, provider: str) -> str:
+        value = str(provider or "").lower()
+        if value == "spotify":
+            return "spotify"
+        if value in ("youtubemusic", "youtube_music", "youtube", "ytmusic"):
+            return "youtubeMusic"
+        return "local"
+
+    def _artist_background_dir_for(self, provider_key: str) -> str:
+        if provider_key == "spotify":
+            return self.spotify_artist_background_dir
+        if provider_key == "youtubeMusic":
+            return self.youtube_music_artist_background_dir
+        return self.local_music_artist_background_dir
+
+    def _artist_background_stream_kind(self, provider_key: str) -> str:
+        if provider_key == "spotify":
+            return "spotify-background"
+        if provider_key == "youtubeMusic":
+            return "youtubemusic-background"
+        return "background"
+
+    def _artist_background_resource_id(self, provider_key: str, clean_id: str, artist_name: str) -> str:
+        if provider_key == "spotify":
+            return self._spotify_artist_background_id(clean_id)
+        if provider_key == "youtubeMusic":
+            return self._local_music_hash("youtubemusic-artist-background", str(artist_name or "").casefold())
+        return self._local_music_hash("artist-background", str(artist_name or "").casefold())
+
     def _artist_background_selection_key(self, provider: str, artist_id: str, artist_name: str) -> str:
-        provider_key = "spotify" if str(provider or "").lower() == "spotify" else "local"
+        provider_key = self._artist_background_provider_key(provider)
         identity = re.sub(r"[^A-Za-z0-9]", "", str(artist_id or ""))
         if not identity:
             identity = self._sanitize_text(artist_name)
@@ -6668,7 +7423,7 @@ class Plugin:
         }
 
     def _manual_artist_background_paths(self, provider: str) -> Set[str]:
-        provider_key = "spotify" if str(provider or "").lower() == "spotify" else "local"
+        provider_key = self._artist_background_provider_key(provider)
         selections = self._load_artist_background_selections()
         result: Set[str] = set()
         library = self._load_local_music_library() if provider_key == "local" else {}
@@ -6688,8 +7443,8 @@ class Plugin:
                 else:
                     artist_name = artist_by_id.get(identity, "") or str(value.get("artistName") or "")
                     if artist_name:
-                        resource_id = self._local_music_hash("artist-background", artist_name.casefold())
-            folder = self.spotify_artist_background_dir if provider_key == "spotify" else self.local_music_artist_background_dir
+                        resource_id = self._artist_background_resource_id(provider_key, identity, artist_name)
+            folder = self._artist_background_dir_for(provider_key)
             if resource_id:
                 for extension in ("jpg", "jpeg", "png", "webp", "avif", "gif"):
                     candidate = os.path.abspath(os.path.join(folder, f"{resource_id}.{extension}"))
@@ -6964,7 +7719,7 @@ class Plugin:
         session = connection = request = None
         try:
             session = winhttp.WinHttpOpen(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.1.0",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.2.0",
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 None,
                 None,
@@ -7155,7 +7910,7 @@ class Plugin:
         params = {"query": f'artist:"{name}"', "fmt": "json", "limit": max(8, min(25, int(limit) * 3))}
         request = urllib.request.Request(
             "https://musicbrainz.org/ws/2/artist/?" + urllib.parse.urlencode(params),
-            headers={"User-Agent": "NowPlayingDecky/2.1.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
+            headers={"User-Agent": "NowPlayingDecky/2.2.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -7209,7 +7964,7 @@ class Plugin:
                 url = f"https://webservice.fanart.tv/{version}/music/{urllib.parse.quote(clean_mbid, safe='')}?" + urllib.parse.urlencode({"api_key": api_key})
                 request = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "NowPlayingDecky/2.1.0", "Accept": "application/json"},
+                    headers={"User-Agent": "NowPlayingDecky/2.2.0", "Accept": "application/json"},
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -7257,7 +8012,7 @@ class Plugin:
             url = "https://www.theaudiodb.com/api/v1/json/2/search.php?" + urllib.parse.urlencode({"s": name})
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "NowPlayingDecky/2.1.0", "Accept": "application/json"},
+                headers={"User-Agent": "NowPlayingDecky/2.2.0", "Accept": "application/json"},
             )
             try:
                 with urllib.request.urlopen(request, timeout=8) as response:
@@ -7372,7 +8127,7 @@ class Plugin:
         return result
 
     def _artist_background_search_sync(self, provider: str, artist_id: str, artist_name: str, source: str = "all") -> Dict[str, Any]:
-        provider_key = "spotify" if str(provider or "").lower() == "spotify" else "local"
+        provider_key = self._artist_background_provider_key(provider)
         name = re.sub(r"\s+", " ", str(artist_name or "").strip())[:180]
         clean_id = re.sub(r"[^A-Za-z0-9]", "", str(artist_id or ""))
         if not name:
@@ -7486,7 +8241,7 @@ class Plugin:
             candidate = dict(self._artist_background_candidates.get(str(candidate_id or "")) or {})
         if not candidate:
             raise RuntimeError("Background choice expired. Search again")
-        provider_key = "spotify" if str(provider or "").lower() == "spotify" else "local"
+        provider_key = self._artist_background_provider_key(provider)
         clean_id = re.sub(r"[^A-Za-z0-9]", "", str(artist_id or ""))
         name = re.sub(r"\s+", " ", str(artist_name or "").strip())[:180]
         if candidate.get("provider") != provider_key or candidate.get("artistId") != clean_id or candidate.get("artistName") != name:
@@ -7515,14 +8270,9 @@ class Plugin:
         width, height = self._image_dimensions_from_bytes(data[:768 * 1024])
         if not width or not height:
             raise RuntimeError("The selected image is not supported")
-        if provider_key == "spotify":
-            resource_id = self._spotify_artist_background_id(clean_id)
-            folder = self.spotify_artist_background_dir
-            stream_kind = "spotify-background"
-        else:
-            resource_id = self._local_music_hash("artist-background", name.casefold())
-            folder = self.local_music_artist_background_dir
-            stream_kind = "background"
+        resource_id = self._artist_background_resource_id(provider_key, clean_id, name)
+        folder = self._artist_background_dir_for(provider_key)
+        stream_kind = self._artist_background_stream_kind(provider_key)
         if not resource_id:
             raise RuntimeError("Invalid artist")
         os.makedirs(folder, exist_ok=True)
@@ -7558,6 +8308,8 @@ class Plugin:
             cache[clean_id] = {"url": image_url, "missing": False, "manual": True, "storedAt": time.time()}
             self._artist_background_cache = cache
             self._save_artist_background_cache()
+        elif provider_key == "youtubeMusic":
+            self._youtube_music_artist_background_cache[name.casefold()] = output
         else:
             self._local_music_artist_background_cache[name.casefold()] = output
         return {"path": output, "resourceId": resource_id, "streamKind": stream_kind, "width": width, "height": height}
@@ -7632,12 +8384,186 @@ class Plugin:
     async def get_spotify_artist_cache_stats(self) -> Dict[str, int]:
         return self._split_asset_stats([self.spotify_artist_background_dir], "spotify")
 
+    # --- YouTube Music artist backgrounds (independent store) -----------------
+    def _set_youtube_music_artist_cache_progress(self, **changes: Any) -> None:
+        with self._youtube_music_artist_cache_progress_lock:
+            self._youtube_music_artist_cache_progress.update(changes)
+
+    def _youtube_music_artist_cache_progress_snapshot(self) -> Dict[str, Any]:
+        with self._youtube_music_artist_cache_progress_lock:
+            return dict(self._youtube_music_artist_cache_progress)
+
+    def _cache_youtube_music_artist_background(self, artist_name: str, image_url: str) -> str:
+        name = str(artist_name or "").strip()
+        url = str(image_url or "").strip()
+        if not name or not url.startswith("http"):
+            return ""
+        background_id = self._local_music_hash("youtubemusic-artist-background", name.casefold())
+        existing = self._local_music_stream_asset_path("youtubemusic-background", background_id)
+        if existing:
+            return existing
+        try:
+            host = str(urllib.parse.urlparse(url).hostname or "").lower()
+            referer = "https://fanart.tv/" if host.endswith("fanart.tv") else "https://www.theaudiodb.com/" if host.endswith("theaudiodb.com") else ""
+            data, content_type = self._download_remote_image_bytes(url, referer, 16 * 1024 * 1024, 20)
+            if not data or len(data) > 16 * 1024 * 1024:
+                return ""
+            extension = self._image_extension_from_content_type(content_type)
+            os.makedirs(self.youtube_music_artist_background_dir, exist_ok=True)
+            output = os.path.join(self.youtube_music_artist_background_dir, f"{background_id}.{extension}")
+            with open(output, "wb") as handle:
+                handle.write(data)
+            return output
+        except Exception as exc:
+            self._log(f"YouTube Music artist background download failed for {name}: {exc}")
+            return ""
+
+    def _youtube_music_artist_background_sync(self, artist_name: str) -> str:
+        name = str(artist_name or "").strip()
+        if not name:
+            return ""
+        key = name.casefold()
+        cached = self._youtube_music_artist_background_cache.get(key)
+        if cached is not None:
+            if cached.startswith("http") or os.path.isfile(cached):
+                return cached
+            self._youtube_music_artist_background_cache.pop(key, None)
+        background_id = self._local_music_hash("youtubemusic-artist-background", key)
+        existing = self._local_music_stream_asset_path("youtubemusic-background", background_id)
+        if existing:
+            self._youtube_music_artist_background_cache[key] = existing
+            return existing
+        candidates: List[str] = []
+        try:
+            candidates.extend(str(item.get("url") or "") for item in self._fanart_artist_background_candidates(name, 8))
+        except Exception as exc:
+            self._log(f"YouTube Music artist fanart.tv lookup failed for {name}: {exc}")
+        try:
+            candidates.extend(str(item.get("url") or "") for item in self._theaudiodb_artist_background_candidates(name, 6))
+        except Exception as exc:
+            self._log(f"YouTube Music artist TheAudioDB lookup failed for {name}: {exc}")
+        seen: Set[str] = set()
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if not value.startswith("http") or value in seen:
+                continue
+            seen.add(value)
+            cached_path = self._cache_youtube_music_artist_background(name, value)
+            if cached_path:
+                self._youtube_music_artist_background_cache[key] = cached_path
+                return cached_path
+        if len(self._youtube_music_artist_background_cache) > 120:
+            self._youtube_music_artist_background_cache.clear()
+        self._youtube_music_artist_background_cache[key] = ""
+        return ""
+
+    async def get_youtube_music_artist_background(self, artist_name: str) -> str:
+        name = str(artist_name or "").strip()[:180]
+        if not name:
+            return ""
+        try:
+            result = await self._run_in_executor(self._cover_executor, self._youtube_music_artist_background_sync, name)
+            if result and os.path.isfile(result):
+                base = await self.get_local_music_stream_base()
+                background_id = self._local_music_hash("youtubemusic-artist-background", name.casefold())
+                version = int(os.path.getmtime(result))
+                return f"{base}/youtubemusic-background/{urllib.parse.quote(background_id, safe='')}?v={version}"
+            return ""
+        except Exception as exc:
+            self._log(f"YouTube Music artist background lookup error for {name}: {exc}")
+            return ""
+
+    async def get_youtube_music_artist_cache_progress(self) -> Dict[str, Any]:
+        return self._youtube_music_artist_cache_progress_snapshot()
+
+    async def get_youtube_music_artist_cache_stats(self) -> Dict[str, int]:
+        return self._split_asset_stats([self.youtube_music_artist_background_dir], "youtubeMusic")
+
+    def _build_youtube_music_artist_cache_sync(self, artists: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not self._youtube_music_artist_cache_build_lock.acquire(blocking=False):
+            raise RuntimeError("YouTube Music artist cache is already being created")
+        self._set_youtube_music_artist_cache_progress(active=True, phase="loading", current="", completed=0, total=0, error="")
+        try:
+            names: List[str] = []
+            for item in artists if isinstance(artists, list) else []:
+                nm = str((item or {}).get("name") or "").strip() if isinstance(item, dict) else ""
+                if nm:
+                    names.append(nm)
+            names = list(dict.fromkeys(names))
+            total = len(names)
+            self._set_youtube_music_artist_cache_progress(phase="background", total=total)
+            cached = 0
+            for index, nm in enumerate(names):
+                self._set_youtube_music_artist_cache_progress(active=True, phase="background", current=nm, completed=index, total=total)
+                try:
+                    if self._youtube_music_artist_background_sync(nm):
+                        cached += 1
+                except Exception as exc:
+                    self._log(f"YouTube Music artist cache build error for {nm}: {exc}")
+                self._set_youtube_music_artist_cache_progress(completed=index + 1)
+            self._set_youtube_music_artist_cache_progress(active=False, phase="complete", current="", completed=total, total=total, error="")
+            return {"artists": total, "cached": cached}
+        except Exception as exc:
+            self._set_youtube_music_artist_cache_progress(active=False, phase="error", current="", error=str(exc))
+            raise
+        finally:
+            self._youtube_music_artist_cache_build_lock.release()
+
+    async def build_youtube_music_artist_cache(self) -> Dict[str, Any]:
+        try:
+            library = await self._youtube_music_result(self._youtube_music.get_library, "artists", 200)
+            artists: List[Dict[str, Any]] = []
+            if isinstance(library, dict):
+                data = library.get("data") if isinstance(library.get("data"), dict) else library
+                container = data.get("artists") if isinstance(data, dict) else {}
+                if isinstance(container, dict) and isinstance(container.get("items"), list):
+                    artists = container.get("items")
+            data = await self._run_in_executor(self._youtube_music_executor, self._build_youtube_music_artist_cache_sync, artists)
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _clear_youtube_music_artist_cache_sync(self) -> Dict[str, int]:
+        if not self._youtube_music_artist_cache_build_lock.acquire(blocking=False):
+            raise RuntimeError("YouTube Music artist cache is busy")
+        self._set_youtube_music_artist_cache_progress(active=True, phase="clearing", current="", completed=0, total=0, error="")
+        try:
+            preserve = self._manual_artist_background_paths("youtubeMusic")
+
+            def update(path: str, index: int, total: int) -> None:
+                self._set_youtube_music_artist_cache_progress(active=True, phase="clearing", current=os.path.basename(path), completed=index, total=total, error="")
+
+            stats = self._clear_asset_folders([self.youtube_music_artist_background_dir], preserve, update)
+            self._youtube_music_artist_background_cache.clear()
+            self._set_youtube_music_artist_cache_progress(active=False, phase="cleared", current="", completed=stats["files"], total=stats["files"], error="")
+            return stats
+        except Exception as exc:
+            self._set_youtube_music_artist_cache_progress(active=False, phase="error", current="", error=str(exc))
+            raise
+        finally:
+            self._youtube_music_artist_cache_build_lock.release()
+
+    async def clear_youtube_music_artist_cache(self) -> Dict[str, Any]:
+        try:
+            data = await self._run_in_executor(self._youtube_music_executor, self._clear_youtube_music_artist_cache_sync)
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _remove_manual_artist_backgrounds_sync(self, provider: str) -> Dict[str, int]:
-        provider_key = "spotify" if str(provider or "").lower() == "spotify" else "local"
-        lock = self._spotify_artist_cache_build_lock if provider_key == "spotify" else self._local_music_cache_build_lock
+        provider_key = self._artist_background_provider_key(provider)
+        lock = (
+            self._spotify_artist_cache_build_lock if provider_key == "spotify"
+            else self._youtube_music_artist_cache_build_lock if provider_key == "youtubeMusic"
+            else self._local_music_cache_build_lock
+        )
         if not lock.acquire(blocking=False):
             raise RuntimeError("Artist background storage is busy")
-        update_progress = self._set_spotify_artist_cache_progress if provider_key == "spotify" else self._set_local_music_cache_progress
+        update_progress = (
+            self._set_spotify_artist_cache_progress if provider_key == "spotify"
+            else self._set_youtube_music_artist_cache_progress if provider_key == "youtubeMusic"
+            else self._set_local_music_cache_progress
+        )
         phase_work = "clearing_manual"
         phase_done = "manual_cleared"
         try:
@@ -7673,6 +8599,8 @@ class Plugin:
                         cache.pop(identity, None)
                 self._artist_background_cache = cache
                 self._save_artist_background_cache()
+            elif provider_key == "youtubeMusic":
+                self._youtube_music_artist_background_cache.clear()
             else:
                 self._local_music_artist_background_cache.clear()
 
@@ -7685,11 +8613,16 @@ class Plugin:
             lock.release()
 
     async def clear_manual_artist_backgrounds(self, provider: str) -> Dict[str, Any]:
-        provider_key = "spotify" if str(provider or "").lower() == "spotify" else "local"
+        provider_key = self._artist_background_provider_key(provider)
         executor = self._spotify_executor if provider_key == "spotify" else self._local_music_executor
         try:
             data = await self._run_in_executor(executor, self._remove_manual_artist_backgrounds_sync, provider_key)
-            stats = await self.get_spotify_artist_cache_stats() if provider_key == "spotify" else await self.get_local_music_settings()
+            if provider_key == "spotify":
+                stats = await self.get_spotify_artist_cache_stats()
+            elif provider_key == "youtubeMusic":
+                stats = await self.get_youtube_music_artist_cache_stats()
+            else:
+                stats = await self.get_local_music_settings()
             return {"ok": True, "data": data, "stats": stats}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -8059,7 +8992,15 @@ class Plugin:
             realtime = self._spotify_playback_from_bridge(bridge)
             if realtime:
                 return realtime
-            return self._spotify_playback_state_sync(2.5, 12.0)
+            if bridge.get("ready"):
+                if self._spotify_continue_managed_queue_sync(bridge):
+                    time.sleep(0.12)
+                    resumed = self._spotify_playback_bridge_request_sync("/snapshot", 1.0)
+                    realtime = self._spotify_playback_from_bridge(resumed)
+                    if realtime:
+                        return realtime
+                return {}
+            return self._spotify_playback_state_sync(10.0, 30.0)
 
         try:
             return {"ok": True, "data": await self._run_in_executor(self._spotify_executor, work)}
@@ -8192,7 +9133,26 @@ class Plugin:
 
         def work() -> Dict[str, Any]:
             self._spotify_require_ready()
+            self._spotify_invalidate_queue_cache()
             try:
+                if self._spotify_playback_bridge_start_with_recovery_sync():
+                    target_uri = context_uri or uri
+                    query = {"uri": uri or target_uri}
+                    if context_uri:
+                        query["context"] = context_uri
+                    if offset_uri:
+                        query["offset"] = offset_uri
+                    bridge_result = self._spotify_playback_bridge_request_sync(
+                        "/action/load?" + urllib.parse.urlencode(query),
+                        2.0,
+                    )
+                    if bridge_result.get("ok"):
+                        self._spotify_invalidate_playback_cache(True)
+                        played_context = context_uri or (uri if uri.startswith("spotify:playlist:") else "")
+                        if played_context.startswith("spotify:playlist:"):
+                            self._spotify_record_recent_playlist(played_context)
+                        return {"deviceId": "Playhub Now Playing", "transport": "integrated"}
+
                 device_id = self._spotify_select_device()
                 body: Dict[str, Any]
                 if context_uri:
@@ -8220,23 +9180,47 @@ class Plugin:
             return {"ok": False, "error": str(exc)}
 
     async def spotify_play_items(self, uris: List[str], start_index: int = 0) -> Dict[str, Any]:
-        cleaned = [
+        filtered = [
             str(uri or "").strip()
             for uri in (uris or [])
             if str(uri or "").strip().startswith(("spotify:track:", "spotify:episode:"))
         ]
-        cleaned = list(dict.fromkeys(cleaned))[:300]
-        if not cleaned:
+        if not filtered:
             return {"ok": False, "error": "No playable Spotify items"}
         try:
-            index = max(0, min(int(start_index or 0), len(cleaned) - 1))
+            raw_index = max(0, min(int(start_index or 0), len(filtered) - 1))
         except Exception:
-            index = 0
-        ordered = cleaned[index:] + cleaned[:index]
+            raw_index = 0
+        # Anchor on the exact track the user picked before de-duplicating. The
+        # complete logical queue remains in the backend, while the native bridge
+        # receives bounded windows that are replenished as playback reaches the
+        # end. This keeps 7k+ track libraries reliable without a giant bridge queue.
+        target = filtered[raw_index]
+        deduped = list(dict.fromkeys(filtered))
+        pivot = deduped.index(target) if target in deduped else 0
+        ordered = deduped[pivot:] + deduped[:pivot]
+        index = 0
 
         def work() -> Dict[str, Any]:
             self._spotify_require_ready()
             try:
+                if self._spotify_playback_bridge_start_with_recovery_sync():
+                    cleaned = self._spotify_begin_managed_queue(ordered)
+                    bridge_result = self._spotify_playback_bridge_request_sync(
+                        "/action/load-tracks",
+                        2.5,
+                        {"uris": cleaned, "start_index": index},
+                    )
+                    if bridge_result.get("ok"):
+                        self._spotify_invalidate_playback_cache(True)
+                        return {
+                            "deviceId": "Playhub Now Playing",
+                            "transport": "integrated",
+                            "queued": len(cleaned),
+                            "total": len(ordered),
+                        }
+                    self._spotify_invalidate_queue_cache()
+
                 device_id = self._spotify_select_device()
                 try:
                     self._spotify_api_sync(
@@ -8246,6 +9230,7 @@ class Plugin:
                         body={"uris": ordered},
                     )
                     queued = len(ordered)
+                    return {"deviceId": device_id, "queued": queued, "transport": "spotify-api"}
                 except SpotifyRateLimitError:
                     raise
                 except Exception:
@@ -8392,7 +9377,7 @@ class Plugin:
             cached_snapshot = self._empty_snapshot()
         live_snapshot = cached_snapshot
         live_snapshot_error = ""
-        if self._normalized_active_service() not in {"localMusic", "spotify"}:
+        if self._normalized_active_service() not in {"localMusic", "youtubeMusic", "spotify"}:
             try:
                 live_snapshot = timed("mediaBridgeSnapshot", lambda: self._canonical_snapshot(self._request_json_once("/snapshot", timeout=1.5)))
             except Exception as exc:
@@ -8432,7 +9417,12 @@ class Plugin:
             except Exception as exc:
                 self._spotify_accessibility_last_error = str(exc)
         try:
-            app_volume_status = timed("appVolumeBridge", lambda: self._run_app_volume_helper(None, ["spotify"]))
+            volume_names = self._current_volume_process_names()
+            app_volume_status = timed(
+                "directCoreAudio",
+                lambda: self._run_app_volume_direct(None, volume_names)
+                or {"ok": False, "reason": "direct-core-audio-unavailable"},
+            )
         except Exception as exc:
             app_volume_status = {"ok": False, "error": str(exc)}
         app_states: Dict[str, bool] = {}
@@ -8448,7 +9438,7 @@ class Plugin:
         now_mono = time.monotonic()
         report = {
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "pluginVersion": "2.1.0",
+            "pluginVersion": "2.2.0",
             "python": sys.version,
             "platform": platform.platform(),
             "backend": {
@@ -8496,7 +9486,8 @@ class Plugin:
                 "cachedSnapshot": self._diagnostic_snapshot_summary(self._spotify_accessibility_snapshot),
                 "liveSnapshot": self._diagnostic_snapshot_summary(spotify_accessibility_live),
             },
-            "appVolumeBridge": app_volume_status,
+            "appVolumeBridge": {"shipped": False, "running": False},
+            "directCoreAudio": app_volume_status,
             "spotify": {
                 "apiEnabled": bool(self.spotify_settings.get("enabled")),
                 "authenticated": bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")),
@@ -8517,7 +9508,7 @@ class Plugin:
                         "/playlists/{id}",
                         "/playlists/{id}/items",
                     ],
-                    "officialApiRequiredFor": ["authentication", "private-library", "playback", "devices", "writes"],
+                    "officialApiRequiredFor": ["authentication", "private-library", "integrated-player-token", "bounded-playback-fallback"],
                 },
                 "playbackHelper": {
                     "path": self.spotify_playback_bridge_runtime_path or self.spotify_playback_bridge_path,
@@ -8542,6 +9533,7 @@ class Plugin:
                     if key in {"status", "title", "artist", "album", "currentIndex", "queueLength", "volume", "isPlaying"}
                 },
             },
+            "youtubeMusic": self._youtube_music.public_settings(),
             "topbar": {
                 "enabled": bool(self.topbar_enabled),
                 "left": bool(self.topbar_left),
@@ -8560,7 +9552,7 @@ class Plugin:
         operation_durations["totalBeforeWrite"] = round((time.monotonic() - diagnostic_started) * 1000, 1)
         runtime_logs = self._read_runtime_logs_for_diagnostics()
         content = (
-            "NOW PLAYING 2.1.0 DIAGNOSTICS\n"
+            "NOW PLAYING 2.2.0 DIAGNOSTICS\n"
             + json.dumps(report, ensure_ascii=False, indent=2)
             + "\n\nSTRUCTURED EVENTS (oldest to newest)\n"
             + "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in structured_events)
@@ -8653,7 +9645,7 @@ class Plugin:
             self._topbar_cached_service = "music"
             self._topbar_cached_at = 0.0
 
-        if active_service == "localMusic":
+        if active_service in {"localMusic", "youtubeMusic"}:
             current = self._current_track_from_data(self._local_music_snapshot_sync())
         elif active_service == "spotify" and bool(self.spotify_settings.get("enabled")) and bool(
             self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")
@@ -8712,7 +9704,7 @@ class Plugin:
 
         status = str(current.get("status") or "").strip().lower()
         title = str(current.get("title") or "").strip()
-        service = active_service if active_service in {"localMusic", "spotify", "spotifyPlayer", "tidal", "appleMusic", "deezer", "amazonMusic", "soundCloud"} else self._service_key_from_snapshot(current)
+        service = active_service if active_service in {"localMusic", "spotify", "spotifyPlayer", "youtubeMusic", "tidal", "appleMusic", "deezer", "amazonMusic", "soundCloud"} else self._service_key_from_snapshot(current)
         if service == "spotifyPlayer":
             service = "spotify"
         if status == "playing" and title:
@@ -8773,7 +9765,7 @@ class Plugin:
             "try{clock.setAttribute('data-decky-nowplaying-clock','1');if(C.left){clock.style.order='-2';document.documentElement.setAttribute('data-decky-nowplaying-left','1');}else{clock.style.removeProperty('order');document.documentElement.removeAttribute('data-decky-nowplaying-left');}}catch(e){}"
             "var b=document.getElementById(C.badge);"
             "if(!b){b=document.createElement('span');b.id=C.badge;b.setAttribute('aria-hidden','true');}"
-            "b.innerHTML=iconSvg(C.service)+'<span></span>';"
+            "b.innerHTML=(C.service==='youtubeMusic'?'<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"9\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"></circle><circle cx=\"12\" cy=\"12\" r=\"5\" opacity=\".32\"></circle><path d=\"M10 8.7 15.3 12 10 15.3z\"></path></svg>':iconSvg(C.service))+'<span></span>';"
             "b.lastChild.textContent=C.label;"
             "var w=document.getElementById(C.weather);"
             "if(w&&w.parentNode){if(w.nextSibling!==b){w.parentNode.insertBefore(b,w.nextSibling);}}"
@@ -8785,7 +9777,7 @@ class Plugin:
         try:
             request = urllib.request.Request(
                 f"http://127.0.0.1:{TOPBAR_CEF_PORT}/json/list",
-                headers={"User-Agent": "Decky Now Playing/2.1.0"},
+                headers={"User-Agent": "Decky Now Playing/2.2.0"},
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 targets = json.loads(response.read().decode("utf-8"))
@@ -8967,23 +9959,25 @@ class Plugin:
                 delay = 0.45 if ready and active else 1.2
 
                 if ready and active:
-                    soft_volume = clamp_value(payload.get("volume", 100), 0, 100)
-                    desired_volume = soft_volume if soft_volume != 100 else clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
-                    if soft_volume != 100 or not session_volume_applied:
-                        result = await self._run_in_executor(self._volume_executor, self._run_spotify_output_volume, desired_volume)
-                        if result.get("ok"):
-                            self.spotify_settings["connect_volume"] = desired_volume
-                            self._save_spotify_settings()
-                            if soft_volume != 100:
-                                self._spotify_connect_volume_changed_at = time.monotonic()
-                            session_volume_applied = True
-                            if soft_volume != 100:
-                                await self._run_in_executor(
-                                    self._spotify_executor,
-                                    self._spotify_playback_bridge_request_sync,
-                                    "/action/volume?value=100",
-                                    0.8,
-                                )
+                    bridge_volume = clamp_value(payload.get("volume", 100), 0, 100)
+                    saved_volume = clamp_value(self.spotify_settings.get("connect_volume", 100), 0, 100)
+                    if not session_volume_applied:
+                        if bridge_volume != saved_volume:
+                            result = await self._run_in_executor(
+                                self._spotify_executor,
+                                self._spotify_playback_bridge_request_sync,
+                                "/action/volume?" + urllib.parse.urlencode({"value": saved_volume}),
+                                0.8,
+                            )
+                            if result.get("ok"):
+                                bridge_volume = saved_volume
+                        session_volume_applied = True
+                    elif bridge_volume != saved_volume:
+                        # Spotify Connect volume changes made from another device
+                        # become the new shared value without a Windows mixer hop.
+                        self.spotify_settings["connect_volume"] = bridge_volume
+                        self._save_spotify_settings()
+                        self._spotify_connect_volume_changed_at = time.monotonic()
 
                     playback_started = status == "Playing" and (
                         previous_status != "Playing" or (uri and uri != previous_uri)
@@ -9034,7 +10028,12 @@ class Plugin:
             self._log(f"startup error: {exc}")
         try:
             if self._local_music_stream_server is None:
-                self._local_music_stream_server = LocalMusicStreamServer(self._local_music_stream_path, self._local_music_stream_asset_path, self._log)
+                self._local_music_stream_server = LocalMusicStreamServer(
+                    self._local_music_stream_path,
+                    self._local_music_stream_asset_path,
+                    self._log,
+                    self._youtube_music.resolve_stream,
+                )
                 self._local_music_stream_server.start()
         except Exception as exc:
             self._log(f"local audio stream start error: {exc}")
@@ -9063,6 +10062,10 @@ class Plugin:
             pass
         try:
             self._stop_spotify_auth_server()
+        except Exception:
+            pass
+        try:
+            self._youtube_music.cancel_browser_auth()
         except Exception:
             pass
         try:
@@ -9097,6 +10100,7 @@ class Plugin:
             self._artist_background_search_executor,
             self._volume_executor,
             self._spotify_executor,
+            self._youtube_music_executor,
             self._source_lifecycle_executor,
             self._local_music_executor,
         ):

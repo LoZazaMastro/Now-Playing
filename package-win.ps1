@@ -24,16 +24,20 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "vendor") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "licenses") | Out-Null
 
 if (Test-Path (Join-Path $Root "bin/AppVolumeBridge.exe")) {
-  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.1.0 uses direct Windows Core Audio."
+  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.2.0 uses direct Windows Core Audio."
 }
 
 if (Test-Path (Join-Path $Root "node_modules")) {
   if (Get-Command npm -ErrorAction SilentlyContinue) {
     npm run build
+    if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
   } elseif (Get-Command pnpm -ErrorAction SilentlyContinue) {
     pnpm run check:i18n
+    if ($LASTEXITCODE -ne 0) { throw "Translation validation failed" }
     pnpm run check:types
+    if ($LASTEXITCODE -ne 0) { throw "TypeScript validation failed" }
     pnpm exec rollup -c
+    if ($LASTEXITCODE -ne 0) { throw "Rollup build failed" }
   } else {
     throw "Neither npm nor pnpm is available to rebuild dist/index.js"
   }
@@ -45,9 +49,9 @@ $Python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $Python) { $Python = Get-Command py -ErrorAction SilentlyContinue }
 if ($Python) {
   if ($Python.Name -eq "py.exe" -or $Python.Name -eq "py") {
-    & $Python.Source -3 -m py_compile (Join-Path $Root "main.py")
+    & $Python.Source -3 -m py_compile (Join-Path $Root "main.py") (Join-Path $Root "ytmusic_service.py")
   } else {
-    & $Python.Source -m py_compile (Join-Path $Root "main.py")
+    & $Python.Source -m py_compile (Join-Path $Root "main.py") (Join-Path $Root "ytmusic_service.py")
   }
   if ($LASTEXITCODE -ne 0) { throw "main.py failed Python syntax validation" }
 } else {
@@ -56,6 +60,7 @@ if ($Python) {
 
 Copy-Item (Join-Path $Root "plugin.json") $Stage
 Copy-Item (Join-Path $Root "main.py") $Stage
+Copy-Item (Join-Path $Root "ytmusic_service.py") $Stage
 Copy-Item (Join-Path $Root "dist/index.js") (Join-Path $Stage "dist")
 Copy-Item (Join-Path $Root "bin/MediaBridge.exe") (Join-Path $Stage "bin")
 Copy-Item (Join-Path $Root "bin/ThumbnailBridge.exe") (Join-Path $Stage "bin")
@@ -66,6 +71,18 @@ Copy-Item (Join-Path $Root "package.json") $Stage
 Copy-Item (Join-Path $Root "LICENSE") $Stage
 Copy-Item (Join-Path $Root "NOTICE") $Stage
 Copy-Item (Join-Path $Root "README.md") $Stage
+
+$ResolvedStage = [IO.Path]::GetFullPath($Stage).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$InstallerGeneratedDirectories = Get-ChildItem -LiteralPath $Stage -Recurse -Directory -Force | Where-Object {
+  $_.Name -in @("__pycache__", ".pytest_cache")
+} | Sort-Object { $_.FullName.Length } -Descending
+foreach ($GeneratedDirectory in $InstallerGeneratedDirectories) {
+  $ResolvedGeneratedDirectory = [IO.Path]::GetFullPath($GeneratedDirectory.FullName)
+  if (-not $ResolvedGeneratedDirectory.StartsWith($ResolvedStage, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove generated installer data outside the staging directory"
+  }
+  Remove-Item -LiteralPath $ResolvedGeneratedDirectory -Recurse -Force
+}
 
 if (Test-Path $Zip) { Remove-Item $Zip -Force }
 Compress-Archive -Path $Stage -DestinationPath $Zip -Force
@@ -81,7 +98,7 @@ Get-ChildItem -LiteralPath $Root -Force | Where-Object {
 
 $ResolvedProjectStage = [IO.Path]::GetFullPath($ProjectStage).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $GeneratedDirectories = Get-ChildItem -LiteralPath $ProjectStage -Recurse -Directory -Force | Where-Object {
-  $_.Name -in @("target", "__pycache__", ".pytest_cache", ".pnpm-store")
+  $_.Name -in @("target", "publish", "publish_tmp", "__pycache__", ".pytest_cache", ".pnpm-store")
 } | Sort-Object { $_.FullName.Length } -Descending
 foreach ($GeneratedDirectory in $GeneratedDirectories) {
   $ResolvedGeneratedDirectory = [IO.Path]::GetFullPath($GeneratedDirectory.FullName)

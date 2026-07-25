@@ -1,17 +1,17 @@
 {
   "name": "now-playing",
-  "version": "2.1.0",
-  "description": "Console-style Windows music controls, fullscreen visuals, optional Spotify browsing and a built-in local music library/player for Decky Loader.",
+  "version": "2.2.0",
+  "description": "Console-style Spotify, YouTube Music, local and Windows media playback with fullscreen visuals for Decky Loader.",
   "author": "LoZazaMastro",
   "type": "module",
   "scripts": {
-    "build": "npm run check:i18n && npm run check:types && rollup -c",
+    "build": "node scripts/validate-translations.mjs && tsc --noEmit --noUnusedLocals --noUnusedParameters && rollup -c",
     "watch": "rollup -c -w",
     "package:win": "powershell -ExecutionPolicy Bypass -File ./package-win.ps1",
     "check:i18n": "node scripts/validate-translations.mjs",
     "check:types": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
-    "check:python": "python -m py_compile main.py && python scripts/validate-runtime.py",
-    "verify": "npm run check:i18n && npm run check:types && npm run check:python && node --check dist/index.js"
+    "check:python": "python -m py_compile main.py ytmusic_service.py && python scripts/validate-runtime.py",
+    "verify": "node scripts/validate-translations.mjs && tsc --noEmit --noUnusedLocals --noUnusedParameters && python -m py_compile main.py ytmusic_service.py && python scripts/validate-runtime.py && node --check dist/index.js"
   },
   "license": "MIT",
   "dependencies": {

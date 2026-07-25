@@ -1,0 +1,110 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "album"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "artiste"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr "playlist"
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "titre"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr "vidéo"
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "radio"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "profil"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr ""
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "Épisode"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "single"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "ep"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "Interprète(s)"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "Auteur(s)/Compositeur(s)"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "Producteur(s)"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "Métadonnées du titre"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr ""
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "singles et ep"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "Livres audio et émissions"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "vidéos"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr ""
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "vous aimerez peut-être aussi"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "épisodes les plus récents"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr ""

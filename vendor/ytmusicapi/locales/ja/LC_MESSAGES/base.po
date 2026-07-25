@@ -1,0 +1,110 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "アルバム"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "アーティスト"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr "プレイリスト"
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "曲"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr "動画"
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "ステーション"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "プロフィール"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr "ポッドキャスト"
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "エピソード"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "シングル"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "ep"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "演奏"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "作詞・作曲"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "プロデューサー"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "音楽のメタデータの提供者"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr "アルバム"
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "シングルと ep"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "オーディオブックと番組"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "動画"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr "プレイリスト"
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "おすすめのアーティスト"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "最新エピソード"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr "ポッドキャスト"

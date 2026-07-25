@@ -1,0 +1,111 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+msgid ""
+msgstr ""
+"Project-Id-Version: \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: 2023-04-23 14:55+0200\n"
+"Last-Translator: Heimen Stoffels <vistausss@fastmail.com>\n"
+"Language-Team: \n"
+"Language: nl\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"X-Generator: Poedit 3.2.2\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "album"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "artiest"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr "afspeellijst"
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "nummer"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr "video"
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "station"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "profiel"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr ""
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "Aflevering"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "single"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "ep"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "Uitgevoerd door"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "Geschreven door"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "Geproduceerd door"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "Muzikale metadata van"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr "albums"
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "singles en ep's"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "Audioboeken en -series"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "video's"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr "afspeellijsten"
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "gerelateerd"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "nieuwste afleveringen"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr "podcasts"

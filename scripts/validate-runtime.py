@@ -9,9 +9,12 @@ that chooses the active media player.
 from __future__ import annotations
 
 import importlib.util
+import asyncio
+import json
 import os
 import sys
 import tempfile
+import threading
 import types
 import urllib.error
 import urllib.request
@@ -28,6 +31,10 @@ if spec is None or spec.loader is None:
     raise RuntimeError("Unable to load main.py")
 backend = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(backend)
+
+sys.path.insert(0, str(ROOT / "vendor"))
+from ytmusic_service import YouTubeMusicService
+from ytmusicapi import setup as setup_youtube_music
 
 
 def request(url: str, range_header: str | None = None, method: str = "GET"):
@@ -163,6 +170,67 @@ def test_spotify_api_snapshot_is_authoritative() -> None:
     assert plugin._normalized_active_service() == "spotify"
 
 
+def test_ready_spotify_bridge_never_polls_web_playback() -> None:
+    plugin = backend.Plugin.__new__(backend.Plugin)
+    plugin.active_service = "spotify"
+    plugin.spotify_settings = {"refresh_token": "test"}
+    plugin._spotify_executor = None
+    plugin._spotify_playback_bridge_request_sync = lambda *_args: {
+        "ready": True,
+        "active": False,
+        "status": "Stopped",
+    }
+
+    async def immediate(_executor, function, *args):
+        return function(*args)
+
+    plugin._run_in_executor = immediate
+    plugin._spotify_playback_state_sync = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("Spotify Web API playback fallback was called while the bridge was ready")
+    )
+    snapshot = asyncio.run(plugin.get_snapshot())
+    assert snapshot["players"] == []
+
+
+def test_spotify_volume_uses_integrated_mixer() -> None:
+    plugin = backend.Plugin.__new__(backend.Plugin)
+    plugin.active_service = "spotify"
+    plugin.spotify_settings = {"connect_volume": 61}
+    plugin._spotify_executor = None
+    plugin._volume_request_lock = threading.RLock()
+    plugin._volume_request_revisions = {}
+    requested_paths = []
+    plugin._save_spotify_settings = lambda: None
+
+    def bridge_request(path, *_args):
+        requested_paths.append(path)
+        return {"ok": True, "ready": True, "volume": 37}
+
+    async def immediate(_executor, function, *args):
+        return function(*args)
+
+    plugin._spotify_playback_bridge_request_sync = bridge_request
+    plugin._run_in_executor = immediate
+    result = asyncio.run(plugin.set_app_volume(37, "spotify", 1))
+    assert result["ok"] is True
+    assert result["volume"] == 37
+    assert result["transport"] == "integrated"
+    assert requested_paths == ["/action/volume?value=37"]
+
+
+def test_spotify_bridge_audio_level_is_forwarded() -> None:
+    plugin = backend.Plugin.__new__(backend.Plugin)
+    snapshot = plugin._spotify_snapshot_from_bridge({
+        "ready": True,
+        "active": True,
+        "status": "Playing",
+        "title": "Metered track",
+        "audioLevel": 0.625,
+    })
+    selected = snapshot.get("selected") or {}
+    assert selected.get("audioLevel") == 0.625
+
+
 def test_empty_snapshots_are_canonical() -> None:
     plugin = backend.Plugin.__new__(backend.Plugin)
     for value in (None, {}, {"players": None}, {"players": [], "selected": None}):
@@ -244,6 +312,11 @@ def test_helper_recovery_architecture() -> None:
     assert "--port" in backend_source
     assert "CreateProcessWithTokenW" in backend_source
     assert "interactive-token" in backend_source
+    assert '"shell-interactive"' in backend_source
+    assert "ShellExecuteExW" in backend_source
+    assert '"direct-interactive"' in backend_source
+    assert "DETACHED_PROCESS" in backend_source
+    assert "SetWindowPos(target, ctypes.c_void_p(-1)" in backend_source
     assert "_direct_media_snapshot_async" in backend_source
     assert "winrt.windows.media.control" in backend_source
 
@@ -279,11 +352,31 @@ def test_spotify_playback_requires_streaming_scope_without_spawning() -> None:
     assert "Reconnect Spotify" in plugin._spotify_playback_bridge_error
     assert plugin._spotify_playback_bridge_retry_at > 0
 
+
+def test_youtube_music_chromium_header_normalization() -> None:
+    copied_headers = (
+        ":authority\r\nmusic.youtube.com\r\n"
+        ":method\r\nPOST\r\n"
+        ":path\r\n/youtubei/v1/browse?prettyPrint=false\r\n"
+        ":scheme\r\nhttps\r\n"
+        "authorization\r\nSAPISIDHASH fake\r\n"
+        "cookie\r\nSID=fake\r\n"
+        "x-goog-authuser\r\n0\r\n"
+    )
+    normalized = YouTubeMusicService._normalize_browser_headers(copied_headers)
+    auth = json.loads(setup_youtube_music(headers_raw=normalized))
+    keys = {key.lower() for key in auth}
+    assert {"authorization", "cookie", "x-goog-authuser"}.issubset(keys)
+    assert not any(key.startswith("/") or key in {"music.youtube.com", "https"} for key in keys)
+
 def main() -> None:
     test_local_stream_ranges()
     test_active_service_matching()
     test_local_frontend_state_is_authoritative()
     test_spotify_api_snapshot_is_authoritative()
+    test_ready_spotify_bridge_never_polls_web_playback()
+    test_spotify_volume_uses_integrated_mixer()
+    test_spotify_bridge_audio_level_is_forwarded()
     test_empty_snapshots_are_canonical()
     test_fanart_relative_asset_urls()
     test_fanart_filename_payload_candidates()
@@ -292,7 +385,8 @@ def main() -> None:
     test_helper_recovery_architecture()
     test_spotify_playback_helper_is_owned_by_plugin()
     test_spotify_playback_requires_streaming_scope_without_spawning()
-    print("Runtime smoke tests OK: ranges, 6 external sources, generic and direct WinRT SMTC fallbacks, canonical empty snapshots, local state, Spotify authority, Spotify playback scope guard, Spotify helper ownership, interactive-session MediaBridge recovery, and in-process fanart.tv transports without external curl.")
+    test_youtube_music_chromium_header_normalization()
+    print("Runtime smoke tests OK: ranges, 6 external sources, generic and direct WinRT SMTC fallbacks, canonical empty snapshots, local state, Spotify bridge authority, zero Web API polling while the bridge is ready, integrated Spotify volume, playback scope guard, helper ownership, interactive-session MediaBridge recovery, Chromium YouTube Music headers, and in-process fanart.tv transports without external curl.")
 
 
 if __name__ == "__main__":

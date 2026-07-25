@@ -1,19 +1,24 @@
 import { definePlugin, routerHook, toaster } from "@decky/api";
 import { DialogButton, Focusable, GamepadButton, Navigation, PanelSection, PanelSectionRow, Router } from "@decky/ui";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { IconType } from "react-icons";
 import { FaAmazon, FaArrowLeft, FaCheck, FaClock, FaCog, FaDeezer, FaExpandAlt, FaFileAlt, FaMusic, FaPause, FaPlay, FaRandom, FaRedoAlt, FaStepBackward, FaStepForward, FaSyncAlt } from "react-icons/fa";
-import { SiApplemusic, SiSoundcloud, SiSpotify, SiTidal } from "react-icons/si";
+import { SiApplemusic, SiSoundcloud, SiSpotify, SiTidal, SiYoutubemusic } from "react-icons/si";
 import * as python from "./python";
 import type { PlayerSnapshot, Snapshot, SourceBehaviorSettings, SpotifyPlusSettings } from "./python";
 import { getSharedSpotifyPlaybackTimestamp, publishSpotifyPlaybackSnapshot, SPOTIFY_PLAYBACK_CHANGED_EVENT, SpotifyBigPicture, SpotifyBrowser, SpotifyPlusSettingsPanel } from "./spotify";
 import { FanartSettingsPanel, LocalMusicBigPicture, LocalMusicBrowser, LocalMusicSettingsPanel } from "./localMusic";
+import { SurroundUpmixControls } from "./surroundControls";
 import { localAudioPlayer } from "./localAudio";
+import { YouTubeMusicBigPicture, YouTubeMusicBrowser, YouTubeMusicSettingsPanel } from "./youtubeMusic";
 import { formatTranslation, getTranslations, localizeRuntimeMessage } from "./i18n";
 import type { CoreTranslation, SpotifyTranslation } from "./i18n";
 import { getSavedSourceVolume, saveSourceVolume, SOURCE_VOLUME_CHANGED_EVENT } from "./sourceVolume";
 import { SmoothProgressFill, SmoothProgressTime } from "./smoothProgress";
+import { ReactiveParticlesLayer, PARTICLE_RESOLUTION_KEY, PARTICLE_RESOLUTION_EVENT, particlePixelRatio } from "./reactiveParticles";
+import { readVisualizerLevels, retainVisualizerAudio } from "./visualizerAudio";
+import { nudgeManualRotation, retainVisualizerControl } from "./visualizerControl";
 
 const emptySnapshot: Snapshot = {
   selectedPlayer: "",
@@ -57,6 +62,7 @@ const FULLSCREEN_EFFECT_SETTINGS_KEY = "nowPlaying.fullscreenEffect";
 const FULLSCREEN_ROUTE = "/now-playing/fullscreen";
 const SPOTIFY_BIG_PICTURE_ROUTE = "/now-playing/spotify-big-picture";
 const LOCAL_MUSIC_BIG_PICTURE_ROUTE = "/now-playing/local-music-big-picture";
+const YOUTUBE_MUSIC_BIG_PICTURE_ROUTE = "/now-playing/youtube-music-big-picture";
 const FULLSCREEN_SETTINGS_ROUTE = "/now-playing/settings-fullscreen";
 const FULLSCREEN_CHROME_STYLE_ID = "np-fullscreen-chrome-style";
 
@@ -152,6 +158,20 @@ const settingsGroupLabelStyle: CSSProperties = {
   opacity: 0.64,
 };
 
+const legendChipStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minWidth: "20px",
+  padding: "1px 6px",
+  borderRadius: "5px",
+  background: "rgba(255,255,255,0.12)",
+  border: "1px solid rgba(255,255,255,0.18)",
+  fontFamily: "monospace",
+  fontSize: "0.9em",
+  fontWeight: 700,
+};
+
 const subtleRowTextStyle: CSSProperties = {
   width: "100%",
   display: "flex",
@@ -231,6 +251,24 @@ function formatEffectLabel(t: CoreTranslation, effect: FullscreenEffectKey) {
       return t.effectEnergySaver;
     case "coverBlur":
       return t.effectCoverBlur;
+    case "flower":
+      return t.effectFlower;
+    case "circle":
+      return t.effectCircle;
+    case "particleField":
+      return t.effectParticleField;
+    case "particleTunnel":
+      return t.effectParticleTunnel;
+    case "particleSphere":
+      return t.effectParticleSphere;
+    case "particleWave":
+      return t.effectParticleWave;
+    case "particleRing":
+      return t.effectParticleRing;
+    case "particleKnot":
+      return t.effectParticleKnot;
+    case "particleCone":
+      return t.effectParticleCone;
   }
 }
 
@@ -243,6 +281,7 @@ type MusicAppButton = {
 
 type MusicAppKey =
   | "spotify"
+  | "youtubeMusic"
   | "tidal"
   | "appleMusic"
   | "deezer"
@@ -253,6 +292,7 @@ type MusicAppKey =
 const musicApps: MusicAppButton[] = [
   { key: "localMusic", label: "Your Music", Icon: FaMusic, open: python.openLocalMusic },
   { key: "spotify", label: "Spotify", Icon: SiSpotify, open: python.openSpotify },
+  { key: "youtubeMusic", label: "YouTube Music", Icon: SiYoutubemusic, open: python.openYouTubeMusic },
   { key: "tidal", label: "Tidal", Icon: SiTidal, open: python.openTidal },
   { key: "appleMusic", label: "Apple Music", Icon: SiApplemusic, open: python.openAppleMusic },
   { key: "deezer", label: "Deezer", Icon: FaDeezer, open: python.openDeezer },
@@ -262,6 +302,7 @@ const musicApps: MusicAppButton[] = [
 
 const SERVICE_ACCENTS: Record<string, string> = {
   spotify: "#1DB954",
+  youtubeMusic: "#FF0033",
   tidal: "#ffffff",
   appleMusic: "#FA243C",
   deezer: "#A238FF",
@@ -280,16 +321,45 @@ type FullscreenEffectKey =
   | "glow"
   | "ocean"
   | "energySaver"
-  | "coverBlur";
+  | "coverBlur"
+  | "flower"
+  | "circle"
+  | "particleField"
+  | "particleTunnel"
+  | "particleSphere"
+  | "particleWave"
+  | "particleRing"
+  | "particleKnot"
+  | "particleCone";
 
 const fullscreenEffects: { key: FullscreenEffectKey }[] = [
+  { key: "particleField" },
+  { key: "particleTunnel" },
+  { key: "particleSphere" },
+  { key: "particleWave" },
+  { key: "particleRing" },
+  { key: "particleKnot" },
+  { key: "particleCone" },
+  { key: "flower" },
+  { key: "circle" },
+  { key: "coverBlur" },
   { key: "glow" },
   { key: "ocean" },
-  { key: "coverBlur" },
   { key: "energySaver" },
 ];
 
 const defaultFullscreenEffect: FullscreenEffectKey = "glow";
+
+type FullscreenViewMode = "standard" | "noClock" | "clockOnly" | "effectOnly";
+
+// X-button order: everything → drop clock+weather (keep cover/info/controls)
+// → the opposite (only clock+weather) → only the effect → back to everything.
+const fullscreenViewModes: FullscreenViewMode[] = ["standard", "noClock", "clockOnly", "effectOnly"];
+
+// Y-button order: full cover → small cover aligned with the title → no cover
+// (metadata slides left into the cover's place) → back to full.
+type FullscreenCoverMode = "default" | "small" | "hidden";
+const fullscreenCoverModes: FullscreenCoverMode[] = ["default", "small", "hidden"];
 
 function normalizeEnabledAppKeys(keys: unknown): MusicAppKey[] {
   const knownKeys = new Set(musicApps.map((app) => app.key));
@@ -877,6 +947,18 @@ function navigateToLocalMusicBigPicture() {
   window.requestAnimationFrame(markAllFullscreenChrome);
 }
 
+function navigateToYouTubeMusicBigPicture() {
+  holdFullscreenChromeSuppressionForTransition();
+  markAllFullscreenChrome();
+  try { Navigation.CloseSideMenus(); } catch {}
+  const mainWindow = Router.WindowStore?.GamepadUIMainWindowInstance ?? Router.WindowStore?.SteamUIWindows?.[0];
+  if (mainWindow?.Navigate) mainWindow.Navigate(YOUTUBE_MUSIC_BIG_PICTURE_ROUTE);
+  else Navigation.Navigate(YOUTUBE_MUSIC_BIG_PICTURE_ROUTE);
+  markAllFullscreenChrome();
+  queueMicrotask(markAllFullscreenChrome);
+  window.requestAnimationFrame(markAllFullscreenChrome);
+}
+
 function navigateToFullscreenSettings() {
   holdFullscreenChromeSuppressionForTransition();
   markAllFullscreenChrome();
@@ -997,11 +1079,296 @@ function OceanLayer() {
   );
 }
 
-function FullscreenEffectLayer(props: { effect: FullscreenEffectKey; coverUrl?: string }) {
+type CoverPaletteColor = { red: number; green: number; blue: number };
+
+function coverPaletteCss(color: CoverPaletteColor, alpha = 1) {
+  return `rgba(${color.red},${color.green},${color.blue},${alpha})`;
+}
+
+function fallbackCoverPalette(accent: string): CoverPaletteColor[] {
+  const value = accent.replace("#", "");
+  const parsed = value.length === 6 ? Number.parseInt(value, 16) : 0x66c0f4;
+  const base = { red: (parsed >> 16) & 255, green: (parsed >> 8) & 255, blue: parsed & 255 };
+  const lift = (channel: number, amount: number) => Math.round(channel + (255 - channel) * amount);
+  return [
+    base,
+    { red: lift(base.red, .34), green: lift(base.green, .34), blue: lift(base.blue, .34) },
+    { red: lift(base.red, .62), green: lift(base.green, .62), blue: lift(base.blue, .62) },
+  ];
+}
+
+function extractCoverPalette(url: string, fallback: CoverPaletteColor[]): Promise<CoverPaletteColor[]> {
+  if (!url.trim()) return Promise.resolve(fallback);
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      try {
+        const sample = document.createElement("canvas");
+        sample.width = 40;
+        sample.height = 40;
+        const context = sample.getContext("2d", { willReadFrequently: true });
+        if (!context) return resolve(fallback);
+        context.drawImage(image, 0, 0, sample.width, sample.height);
+        const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+        const candidates: { color: CoverPaletteColor; score: number }[] = [];
+        for (let index = 0; index < pixels.length; index += 16) {
+          if (pixels[index + 3] < 180) continue;
+          const red = pixels[index];
+          const green = pixels[index + 1];
+          const blue = pixels[index + 2];
+          const maximum = Math.max(red, green, blue);
+          const minimum = Math.min(red, green, blue);
+          const chroma = maximum - minimum;
+          const luminance = (red * .2126 + green * .7152 + blue * .0722) / 255;
+          if (maximum < 34 || minimum > 238 || chroma < 24) continue;
+          candidates.push({ color: { red, green, blue }, score: chroma * (1 - Math.abs(luminance - .58) * .72) });
+        }
+        candidates.sort((left, right) => right.score - left.score);
+        const palette: CoverPaletteColor[] = [];
+        for (const candidate of candidates) {
+          const distinct = palette.every((color) => Math.hypot(
+            color.red - candidate.color.red,
+            color.green - candidate.color.green,
+            color.blue - candidate.color.blue,
+          ) > 76);
+          if (distinct) palette.push(candidate.color);
+          if (palette.length === 3) break;
+        }
+        resolve(palette.length >= 2 ? palette : fallback);
+      } catch {
+        resolve(fallback);
+      }
+    };
+    image.onerror = () => resolve(fallback);
+    image.src = url;
+  });
+}
+
+function coverNeedsDarkMetadata(url: string): Promise<boolean> {
+  if (!url.trim()) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      try {
+        const sample = document.createElement("canvas");
+        sample.width = 36;
+        sample.height = 36;
+        const context = sample.getContext("2d", { willReadFrequently: true });
+        if (!context) return resolve(false);
+        context.drawImage(image, 0, 0, sample.width, sample.height);
+        const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+        let count = 0;
+        let luminanceTotal = 0;
+        let lightPixels = 0;
+        for (let index = 0; index < pixels.length; index += 4) {
+          if (pixels[index + 3] < 160) continue;
+          const red = pixels[index] / 255;
+          const green = pixels[index + 1] / 255;
+          const blue = pixels[index + 2] / 255;
+          const luminance = red * .2126 + green * .7152 + blue * .0722;
+          luminanceTotal += luminance;
+          const minChannel = Math.min(red, green, blue);
+          const maxChannel = Math.max(red, green, blue);
+          // A pixel is "light" if it is bright overall OR a light pastel — light
+          // yellow, cyan (azzurro), green or pink washed toward white have all
+          // channels fairly high, so white metadata text is hard to read on them.
+          if (luminance >= .72 || (minChannel >= .55 && maxChannel >= .82)) lightPixels += 1;
+          count += 1;
+        }
+        if (!count) return resolve(false);
+        const average = luminanceTotal / count;
+        const lightShare = lightPixels / count;
+        resolve(average >= .68 || lightShare >= .5);
+      } catch {
+        resolve(false);
+      }
+    };
+    image.onerror = () => resolve(false);
+    image.src = url;
+  });
+}
+
+function ParticleVisualizerLayer(props: {
+  mode: "flower" | "circle";
+  coverUrl?: string;
+  isPlaying: boolean;
+  useLocalAudio: boolean;
+}) {
+  const { mode, coverUrl, isPlaying, useLocalAudio } = props;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const paletteRef = useRef<CoverPaletteColor[]>(fallbackCoverPalette(accentForKey(loadEnabledAppKeys()[0])));
+  const playingRef = useRef(isPlaying);
+  const localAudioRef = useRef(useLocalAudio);
+  playingRef.current = isPlaying;
+  localAudioRef.current = useLocalAudio;
+
+  useEffect(() => retainVisualizerAudio(useLocalAudio), [useLocalAudio]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fallback = fallbackCoverPalette(accentForKey(loadEnabledAppKeys()[0]));
+    void extractCoverPalette(String(coverUrl || ""), fallback).then((palette) => {
+      if (!cancelled) paletteRef.current = palette;
+    });
+    return () => { cancelled = true; };
+  }, [coverUrl]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return;
+    let width = 1;
+    let height = 1;
+    let frame = 0;
+    let start = performance.now();
+    const count = 560;
+    let smoothedEnergy = 0;
+    let smoothedBass = 0;
+    let smoothedMid = 0;
+    let smoothedTreble = 0;
+
+    const resize = () => {
+      const ratio = Math.min(1.35, window.devicePixelRatio || 1);
+      const host = canvas.parentElement;
+      const fullscreenRoot = canvas.closest<HTMLElement>(".npFullscreenRoot");
+      const hostRect = host?.getBoundingClientRect();
+      const rootRect = fullscreenRoot?.getBoundingClientRect();
+      width = Math.max(1, Math.round(Math.max(
+        Number(hostRect?.width || 0),
+        Number(rootRect?.width || 0),
+        Number(document.documentElement.clientWidth || 0),
+        Number(window.innerWidth || 0),
+      ) || 1920));
+      height = Math.max(1, Math.round(Math.max(
+        Number(hostRect?.height || 0),
+        Number(rootRect?.height || 0),
+        Number(document.documentElement.clientHeight || 0),
+        Number(window.innerHeight || 0),
+      ) || 1080));
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    };
+
+    const render = (now: number) => {
+      const time = Math.max(0, (now - start) / 1000);
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, width, height);
+      const scale = Math.min(width, height) / 116;
+      const centerX = width * .5;
+      const centerY = height * .5;
+      const measured = readVisualizerLevels(localAudioRef.current, playingRef.current, time);
+      const targetEnergy = clamp(measured.energy, 0, 1);
+      const response = targetEnergy > smoothedEnergy ? .28 : .075;
+      smoothedEnergy += (targetEnergy - smoothedEnergy) * response;
+      smoothedBass += (clamp(measured.bass, 0, 1) - smoothedBass) * response;
+      smoothedMid += (clamp(measured.mid, 0, 1) - smoothedMid) * response;
+      smoothedTreble += (clamp(measured.treble, 0, 1) - smoothedTreble) * response;
+      const palette = paletteRef.current;
+      const background = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, Math.max(width, height) * .62);
+      background.addColorStop(0, coverPaletteCss(palette[0], .1 + smoothedEnergy * .14));
+      background.addColorStop(.5, coverPaletteCss(palette[1] || palette[0], .035 + smoothedEnergy * .06));
+      background.addColorStop(1, "rgba(0,0,0,0)");
+      context.fillStyle = background;
+      context.fillRect(0, 0, width, height);
+      context.globalCompositeOperation = "lighter";
+
+      for (let index = 1; index <= count; index += 1) {
+        const phase = index / count;
+        let x = 0;
+        let y = 0;
+        if (mode === "flower") {
+          const step = .0286 + Math.sin(time * .16) * .0016;
+          const angle = step * index;
+          const centerRadius = 23 + smoothedBass * 10;
+          const petalRadius = 14 + smoothedMid * 14;
+          x = centerRadius * Math.cos(angle) + Math.sin(index / step) * petalRadius;
+          y = centerRadius * Math.sin(angle) + Math.cos(index / step) * petalRadius;
+        } else {
+          const angle = index * .115 + time * (.12 + smoothedTreble * .18);
+          const radius = 39 + smoothedBass * 12 + Math.sin(index * .13 + time * 1.35) * (6 + smoothedMid * 13);
+          x = Math.sin(angle) * radius;
+          y = Math.cos(angle) * radius;
+        }
+
+        const rotation = time * (.045 + smoothedTreble * .08);
+        const rotatedX = x * Math.cos(rotation) - y * Math.sin(rotation);
+        const rotatedY = x * Math.sin(rotation) + y * Math.cos(rotation);
+        const depth = Math.sin(index * .19 + time * (1.7 + smoothedTreble * 2.2));
+        const pointSize = Math.max(.55, .9 + depth * .38 + phase * .32 + smoothedEnergy * 1.35);
+        context.globalAlpha = Math.max(.12, .3 + depth * .18 + smoothedEnergy * .34);
+        context.fillStyle = coverPaletteCss(palette[index % palette.length]);
+        context.beginPath();
+        context.arc(centerX + rotatedX * scale, centerY + rotatedY * scale, pointSize, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.globalAlpha = 1;
+      context.globalCompositeOperation = "source-over";
+      frame = window.requestAnimationFrame(render);
+    };
+
+    resize();
+    window.addEventListener("resize", resize);
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
+    if (observer && canvas.parentElement) observer.observe(canvas.parentElement);
+    frame = window.requestAnimationFrame(render);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", resize);
+      observer?.disconnect();
+      start = 0;
+    };
+  }, [mode]);
+
+  return <div className="npFullscreenEffectLayer npParticleLayer" aria-hidden="true"><canvas ref={canvasRef} className="npParticleCanvas" /></div>;
+}
+
+class EffectLayerBoundary extends Component<{ children?: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.warn("Now Playing fullscreen effect failed to render", error);
+  }
+
+  render() {
+    // A failed effect renders as a plain black background instead of taking
+    // down the whole fullscreen route with the Decky error screen.
+    return this.state.failed ? null : this.props.children;
+  }
+}
+
+function FullscreenEffectLayer(props: { effect: FullscreenEffectKey; coverUrl?: string; isPlaying: boolean; useLocalAudio: boolean }) {
   if (props.effect === "energySaver") return null;
 
   if (props.effect === "ocean") {
     return <OceanLayer />;
+  }
+
+  if (props.effect === "flower" || props.effect === "circle") {
+    return <ParticleVisualizerLayer mode={props.effect} coverUrl={props.coverUrl} isPlaying={props.isPlaying} useLocalAudio={props.useLocalAudio} />;
+  }
+
+  if (
+    props.effect === "particleField" || props.effect === "particleTunnel" || props.effect === "particleSphere"
+    || props.effect === "particleWave" || props.effect === "particleRing" || props.effect === "particleKnot" || props.effect === "particleCone"
+  ) {
+    const particleMode = props.effect === "particleTunnel" ? "tunnel"
+      : props.effect === "particleSphere" ? "sphere"
+      : props.effect === "particleWave" ? "wave"
+      : props.effect === "particleRing" ? "ring"
+      : props.effect === "particleKnot" ? "knot"
+      : props.effect === "particleCone" ? "cone"
+      : "field";
+    return <ReactiveParticlesLayer mode={particleMode} coverUrl={props.coverUrl} accent={accentForKey(loadEnabledAppKeys()[0])} isPlaying={props.isPlaying} useLocalAudio={props.useLocalAudio} />;
   }
 
   if (props.effect === "coverBlur") {
@@ -1025,13 +1392,28 @@ function FullscreenEffectLayer(props: { effect: FullscreenEffectKey; coverUrl?: 
 function FullscreenRoute() {
   const t = useTranslations();
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
-  const [fullscreenEffect] = useState<FullscreenEffectKey>(loadFullscreenEffect);
+  const [fullscreenEffect, setFullscreenEffect] = useState<FullscreenEffectKey>(loadFullscreenEffect);
+  const [effectToastLabel, setEffectToastLabel] = useState<string>("");
+  const [effectToastVisible, setEffectToastVisible] = useState<boolean>(false);
+  const effectToastTimerRef = useRef<number>(0);
+  const [viewMode, setViewMode] = useState<FullscreenViewMode>("standard");
+  const [coverMode, setCoverMode] = useState<FullscreenCoverMode>("default");
+  const [smallCoverPx, setSmallCoverPx] = useState<number>(0);
+  const [controlsHidden, setControlsHidden] = useState<boolean>(false);
+  const [metaShift, setMetaShift] = useState<number>(0);
+  const idleTimerRef = useRef<number>(0);
+  const playPauseRef = useRef<any>(null);
+  const metaRef = useRef<HTMLDivElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const coverRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const [coverUrl, setCoverUrl] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
   const [fullscreenNow, setFullscreenNow] = useState<Date>(() => new Date());
   const [fullscreenWeather, setFullscreenWeather] = useState<string>("");
   const refreshingRef = useRef<boolean>(false);
-  const localMusicFullscreen = loadEnabledAppKeys()[0] === "localMusic";
+  const fullscreenService = loadEnabledAppKeys()[0];
+  const localMusicFullscreen = fullscreenService === "localMusic" || fullscreenService === "youtubeMusic";
 
   const current: PlayerSnapshot | null = useMemo(
     () => snapshot.selected ?? snapshot.players?.[0] ?? null,
@@ -1057,7 +1439,7 @@ function FullscreenRoute() {
         const track = local.track;
         const artist = Array.isArray(track?.artists) ? track.artists.map((value: any) => value?.name).filter(Boolean).join(", ") : "";
         const player: PlayerSnapshot | null = track ? {
-          id: "localMusic", name: t.localMusicLabel, title: String(track?.name ?? ""), artist, album: String(track?.album?.name ?? ""),
+          id: fullscreenService, name: fullscreenService === "youtubeMusic" ? "YouTube Music" : t.localMusicLabel, title: String(track?.name ?? ""), artist, album: String(track?.album?.name ?? ""),
           status: local.status, length: Number(local.length || track?.duration_ms || 0), position: Number(local.position || 0), canNext: local.canNext, canPrevious: local.canPrevious,
           canPlay: true, canPause: true, canTogglePlayPause: true, isSelected: true, isCurrent: true, canShuffle: true, canRepeat: true, shuffleActive: local.shuffleActive, repeatMode: local.repeatMode === "All" ? "List" : local.repeatMode === "One" ? "Track" : "Off",
         } : null;
@@ -1071,6 +1453,123 @@ function FullscreenRoute() {
       refreshingRef.current = false;
     }
   }
+
+  const cycleFullscreenEffect = (step: number) => {
+    setFullscreenEffect((currentEffect) => {
+      const index = fullscreenEffects.findIndex((option) => option.key === currentEffect);
+      const nextIndex = (index + step + fullscreenEffects.length) % fullscreenEffects.length;
+      const nextEffect = fullscreenEffects[nextIndex].key;
+      saveFullscreenEffect(nextEffect);
+      setEffectToastLabel(formatEffectLabel(t, nextEffect));
+      setEffectToastVisible(true);
+      if (effectToastTimerRef.current) window.clearTimeout(effectToastTimerRef.current);
+      effectToastTimerRef.current = window.setTimeout(() => {
+        effectToastTimerRef.current = 0;
+        setEffectToastVisible(false);
+      }, 2000);
+      return nextEffect;
+    });
+  };
+
+  useEffect(() => () => {
+    if (effectToastTimerRef.current) window.clearTimeout(effectToastTimerRef.current);
+    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+  }, []);
+
+  const wakeControls = useCallback(() => {
+    // Any directional input brings the full standard layout back — cover,
+    // track info and playback controls — regardless of the current view/cover mode.
+    setViewMode("standard");
+    setCoverMode("default");
+    setControlsHidden(false);
+    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => {
+      idleTimerRef.current = 0;
+      setControlsHidden(true);
+    }, 5000);
+  }, []);
+
+  // Hide the controls after 5s from opening fullscreen. Play/pause, previous and
+  // next (LT/RT/R3) intentionally do NOT re-show them; only a D-pad press does.
+  useEffect(() => {
+    idleTimerRef.current = window.setTimeout(() => {
+      idleTimerRef.current = 0;
+      setControlsHidden(true);
+    }, 5000);
+    return () => {
+      if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    };
+  }, []);
+
+  // Start with the play/pause button focused so the user never lands on the
+  // search bar or other elements hidden behind the fullscreen overlay.
+  useEffect(() => {
+    let tries = 0;
+    const focusPlayPause = () => {
+      const element = playPauseRef.current as HTMLElement | null;
+      if (element && typeof element.focus === "function") {
+        try { element.focus(); return; } catch { /* retry below */ }
+      }
+      if (tries++ < 20) window.requestAnimationFrame(focusPlayPause);
+    };
+    focusPlayPause();
+  }, []);
+
+  const cycleViewMode = () => {
+    setViewMode((currentMode) => {
+      const index = fullscreenViewModes.indexOf(currentMode);
+      return fullscreenViewModes[(index + 1) % fullscreenViewModes.length];
+    });
+  };
+
+  const cycleCoverMode = () => {
+    setCoverMode((currentMode) => {
+      const index = fullscreenCoverModes.indexOf(currentMode);
+      return fullscreenCoverModes[(index + 1) % fullscreenCoverModes.length];
+    });
+  };
+
+  // Playback controls fade after the 5s idle timeout in every fullscreen view
+  // (and are always hidden in the clock-only and effect-only views).
+  const controlsFadedOut = controlsHidden || viewMode === "clockOnly" || viewMode === "effectOnly";
+
+  // In the "small" cover mode the cover is a fixed size whose top edge lines up
+  // with the song title in the no-controls layout (metadata dropped down). It is
+  // only (re)measured while the controls are hidden, so showing the controls
+  // just moves the metadata text and never resizes the cover.
+  useLayoutEffect(() => {
+    if (coverMode !== "small") return;
+    if (!controlsFadedOut && smallCoverPx > 0) return;
+    const cover = coverRef.current;
+    const title = titleRef.current;
+    if (!cover || !title) return;
+    const coverBottom = cover.getBoundingClientRect().bottom;
+    const titleTop = title.getBoundingClientRect().top;
+    const size = Math.round(coverBottom - titleTop);
+    if (size > 48 && Math.abs(size - smallCoverPx) > 1) setSmallCoverPx(size);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coverMode, controlsFadedOut, metaShift, viewMode, title, artist, album]);
+
+  // The right stick lets the user freely spin the current fullscreen effect.
+  useEffect(() => retainVisualizerControl(), []);
+
+  useLayoutEffect(() => {
+    if (!controlsFadedOut || viewMode === "clockOnly" || viewMode === "effectOnly") {
+      setMetaShift(0);
+      return;
+    }
+    const meta = metaRef.current;
+    const controls = controlsRef.current;
+    if (!meta || !controls) return;
+    const metaRect = meta.getBoundingClientRect();
+    const controlsRect = controls.getBoundingClientRect();
+    // metaRect already includes any currently applied shift, so remove it
+    // before computing the total translation that bottom-aligns the metadata
+    // with the (now hidden) playback controls.
+    const shift = Math.max(0, Math.round(controlsRect.bottom - (metaRect.bottom - metaShift)));
+    setMetaShift(shift);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlsFadedOut, viewMode]);
 
   async function runAction(action: () => Promise<unknown>) {
     try {
@@ -1132,9 +1631,11 @@ function FullscreenRoute() {
     (async () => {
       try {
         const localTrack = localMusicFullscreen ? localAudioPlayer.getSnapshot().track : null;
-        const url = localTrack?.coverId
+        const localImages = Array.isArray(localTrack?.images) && localTrack.images.length ? localTrack.images : localTrack?.album?.images;
+        const directImage = Array.isArray(localImages) ? String(localImages[localImages.length - 1]?.url ?? "") : "";
+        const url = directImage || (localTrack?.coverId
           ? await python.getLocalMusicCover(String(localTrack.coverId))
-          : await python.getCover(trackTitle, trackArtist, trackAlbum);
+          : await python.getCover(trackTitle, trackArtist, trackAlbum));
         if (!cancelled) setCoverUrl(url || "");
       } catch (error) {
         if (!cancelled) console.warn(t.coverFailed, error);
@@ -1148,8 +1649,29 @@ function FullscreenRoute() {
 
   return (
     <Focusable
+      className="npFullscreenRoot"
       onCancel={navigateBackFromFullscreen}
       onCancelButton={navigateBackFromFullscreen}
+      onButtonDown={(event: any) => {
+        const button = event?.detail?.button;
+        if (button === GamepadButton.BUMPER_LEFT) cycleFullscreenEffect(-1);
+        else if (button === GamepadButton.BUMPER_RIGHT) cycleFullscreenEffect(1);
+        else if (button === GamepadButton.SECONDARY) cycleViewMode();
+        else if (button === GamepadButton.OPTIONS) cycleCoverMode();
+        else if (button === GamepadButton.TRIGGER_LEFT) {
+          if (canUsePrevious) void runAction(() => localMusicFullscreen ? localAudioPlayer.command("previous") : python.previousTrack());
+        }
+        else if (button === GamepadButton.TRIGGER_RIGHT) {
+          if (canUseNext) void runAction(() => localMusicFullscreen ? localAudioPlayer.command("next") : python.nextTrack());
+        }
+        else if (button === GamepadButton.RSTICK_CLICK) {
+          if (canUsePlayPause) void runAction(() => localMusicFullscreen ? localAudioPlayer.command("play_pause") : python.playPause());
+        }
+        // Up/down rotate the 3D effect and never touch the playback controls.
+        else if (button === GamepadButton.DIR_UP) nudgeManualRotation(-1);
+        else if (button === GamepadButton.DIR_DOWN) nudgeManualRotation(1);
+        else if (button === GamepadButton.DIR_LEFT || button === GamepadButton.DIR_RIGHT) wakeControls();
+      }}
       style={{
         position: "fixed",
         inset: 0,
@@ -1255,6 +1777,30 @@ function FullscreenRoute() {
           transform: translate3d(10%, -50%, 0);
         }
 
+        .npParticleLayer {
+          background: #000;
+        }
+
+        .npParticleCanvas {
+          position: absolute;
+          inset: 0;
+          display: block;
+          width: 100%;
+          height: 100%;
+        }
+
+        .npReactiveParticlesLayer {
+          background: #000;
+        }
+
+        .npReactiveParticlesCanvas {
+          position: absolute;
+          inset: 0;
+          display: block;
+          width: 100%;
+          height: 100%;
+        }
+
         .npFullscreenNoise {
           position: absolute;
           inset: 0;
@@ -1296,6 +1842,58 @@ function FullscreenRoute() {
         }
 
         .npFullscreenStatus {
+          transition: opacity .55s ease;
+        }
+
+        .npFullscreenControls {
+          transition: opacity .55s ease, left .5s ease;
+        }
+
+        .npFullscreenMeta {
+          transition: transform .65s ease, opacity .55s ease, left .5s ease;
+        }
+
+        .npFullscreenControlsHidden .npFullscreenControls {
+          opacity: 0 !important;
+          pointer-events: none;
+        }
+
+        .npFullscreenView-noClock .npFullscreenStatus,
+        .npFullscreenView-clockOnly .npFullscreenCover,
+        .npFullscreenView-clockOnly .npFullscreenMeta,
+        .npFullscreenView-effectOnly .npFullscreenStatus,
+        .npFullscreenView-effectOnly .npFullscreenCover,
+        .npFullscreenView-effectOnly .npFullscreenMeta {
+          opacity: 0 !important;
+          pointer-events: none;
+        }
+
+        .npFullscreenEffectToast {
+          position: absolute;
+          right: clamp(64px, 5vw, 108px);
+          top: clamp(42px, 5vh, 74px);
+          z-index: 8;
+          max-width: 42vw;
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          text-align: right;
+          font-size: clamp(22px, 1.75vw, 34px);
+          line-height: 1.1;
+          font-weight: 700;
+          color: rgba(255,255,255,.94);
+          text-shadow: 0 2px 18px rgba(0,0,0,0.58);
+          opacity: 0;
+          transition: opacity .45s ease;
+          pointer-events: none;
+        }
+
+        .npFullscreenEffectToastVisible {
+          opacity: 1;
+          transition: opacity .1s ease;
+        }
+
+        .npFullscreenStatus {
           position: absolute;
           left: clamp(64px, 5vw, 108px);
           top: clamp(42px, 5vh, 74px);
@@ -1321,21 +1919,42 @@ function FullscreenRoute() {
 
         .npFullscreenCover {
           position: absolute;
-          left: clamp(64px, 5vw, 108px);
+          left: var(--np-cover-left, clamp(64px, 5vw, 108px));
           bottom: clamp(76px, 8.4vh, 118px);
-          width: clamp(170px, 13.6vw, 278px);
-          height: clamp(170px, 13.6vw, 278px);
+          width: var(--np-cover-w, clamp(170px, 13.6vw, 278px));
+          height: var(--np-cover-w, clamp(170px, 13.6vw, 278px));
           border-radius: clamp(7px, 0.65vw, 12px);
           overflow: hidden;
           background: rgba(255,255,255,0.08);
           box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
-          opacity: 0.82;
+          opacity: 1;
+          transform-origin: left bottom;
+          transition: width .5s ease, height .5s ease, opacity .5s ease;
           z-index: 2;
+        }
+
+        .npFullscreenCover {
+          box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 18px 70px 26px rgba(0,0,0,0.5);
+        }
+
+        .npFullscreenCoverMode-hidden .npFullscreenCover {
+          opacity: 0;
+          pointer-events: none;
+        }
+
+        .npFullscreenMeta::before {
+          content: "";
+          position: absolute;
+          inset: -14% -10% -18% -8%;
+          background: radial-gradient(ellipse at 30% 55%, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.34) 42%, transparent 74%);
+          filter: blur(26px);
+          z-index: -1;
+          pointer-events: none;
         }
 
         .npFullscreenMeta {
           position: absolute;
-          left: calc(clamp(64px, 5vw, 108px) + clamp(170px, 13.6vw, 278px) + clamp(28px, 2.2vw, 48px));
+          left: calc(var(--np-cover-left, clamp(64px, 5vw, 108px)) + var(--np-cover-reserve, clamp(170px, 13.6vw, 278px)) + var(--np-cover-gap, clamp(28px, 2.2vw, 48px)));
           right: clamp(64px, 7vw, 144px);
           top: calc(100vh - clamp(76px, 8.4vh, 118px) - clamp(170px, 13.6vw, 278px));
           transform: translateY(clamp(4px, 0.32vw, 7px));
@@ -1361,21 +1980,22 @@ function FullscreenRoute() {
           font-size: clamp(23px, 2vw, 38px);
           line-height: 1.2;
           letter-spacing: 0;
-          color: rgba(255,255,255,1);
-          opacity: 0.72;
+          color: #B8B8B8;
+          opacity: 1;
           overflow-wrap: anywhere;
           text-shadow: 0 2px 16px rgba(0,0,0,0.54);
-          mix-blend-mode: screen;
+          mix-blend-mode: normal;
         }
 
         .npFullscreenAlbum {
-          opacity: 0.5;
+          color: #808080;
+          opacity: 1;
           font-size: clamp(20px, 1.8vw, 34px);
         }
 
         .npFullscreenControls {
           position: absolute;
-          left: calc(clamp(64px, 5vw, 108px) + clamp(170px, 13.6vw, 278px) + clamp(28px, 2.2vw, 48px));
+          left: calc(var(--np-cover-left, clamp(64px, 5vw, 108px)) + var(--np-cover-reserve, clamp(170px, 13.6vw, 278px)) + var(--np-cover-gap, clamp(28px, 2.2vw, 48px)));
           bottom: clamp(76px, 8.4vh, 118px);
           display: flex;
           align-items: center;
@@ -1482,8 +2102,26 @@ function FullscreenRoute() {
         }
       `}</style>
 
-      <div className="npFullscreenRoot">
-        <FullscreenEffectLayer effect={fullscreenEffect} coverUrl={coverUrl} />
+      <div
+        className={`npFullscreenRoot npFullscreenView-${viewMode} npFullscreenCoverMode-${coverMode}${controlsFadedOut ? " npFullscreenControlsHidden" : ""}`}
+        style={(() => {
+          const left = "clamp(64px, 5vw, 108px)";
+          const gap = "clamp(28px, 2.2vw, 48px)";
+          const full = "clamp(170px, 13.6vw, 278px)";
+          const small = smallCoverPx > 0 ? `${smallCoverPx}px` : "clamp(110px, 8.6vw, 172px)";
+          const coverW = coverMode === "default" ? full : small;
+          const reserve = coverMode === "hidden" ? `calc(-1 * ${gap})` : coverW;
+          return { "--np-cover-left": left, "--np-cover-gap": gap, "--np-cover-w": coverW, "--np-cover-reserve": reserve } as CSSProperties;
+        })()}
+      >
+        <EffectLayerBoundary key={fullscreenEffect}>
+          <FullscreenEffectLayer
+            effect={fullscreenEffect}
+            coverUrl={coverUrl}
+            isPlaying={isPlaying}
+            useLocalAudio={localMusicFullscreen}
+          />
+        </EffectLayerBoundary>
         {fullscreenEffect === "glow" || fullscreenEffect === "coverBlur" ? (
           <div className="npFullscreenNoise" aria-hidden="true" />
         ) : null}
@@ -1493,7 +2131,11 @@ function FullscreenRoute() {
           {fullscreenWeather ? <span className="npFullscreenStatusWeather">{fullscreenWeather}</span> : null}
         </div>
 
-        <div className="npFullscreenCover">
+        <div className={`npFullscreenEffectToast${effectToastVisible ? " npFullscreenEffectToastVisible" : ""}`} aria-hidden="true">
+          {effectToastLabel}
+        </div>
+
+        <div className="npFullscreenCover" ref={coverRef}>
           {coverUrl && coverUrl.trim() ? (
             <img
               src={coverUrl}
@@ -1521,13 +2163,32 @@ function FullscreenRoute() {
           )}
         </div>
 
-        <div className="npFullscreenMeta">
-          <h1 className="npFullscreenTitle">{title}</h1>
+        <div
+          className="npFullscreenMeta"
+          ref={metaRef}
+          style={metaShift > 0 ? { transform: `translateY(calc(clamp(4px, 0.32vw, 7px) + ${metaShift}px))` } : undefined}
+        >
+          <h1 className="npFullscreenTitle" ref={titleRef}>{title}</h1>
           <p className="npFullscreenText">{artist}</p>
           <p className="npFullscreenText npFullscreenAlbum">{album}</p>
         </div>
 
-        <Focusable className="npFullscreenControls" flow-children="horizontal">
+        <Focusable
+          className="npFullscreenControls"
+          flow-children="horizontal"
+          ref={controlsRef as any}
+          onButtonDown={(event: any) => {
+            // Block up/down navigation so focus can never leave the playback row
+            // for the search bar or elements hidden behind the fullscreen overlay.
+            // Up/down instead rotate the 3D effect and never re-show the controls.
+            const button = event?.detail?.button;
+            if (button === GamepadButton.DIR_UP || button === GamepadButton.DIR_DOWN) {
+              event?.preventDefault?.();
+              event?.stopPropagation?.();
+              nudgeManualRotation(button === GamepadButton.DIR_DOWN ? 1 : -1);
+            }
+          }}
+        >
           <DialogButton
             className="npFullscreenControlButton"
             style={{ opacity: canUsePrevious ? 1 : 0.38 }}
@@ -1541,6 +2202,7 @@ function FullscreenRoute() {
 
           <DialogButton
             className="npFullscreenControlButton"
+            ref={playPauseRef}
             style={{ opacity: canUsePlayPause ? 1 : 0.38 }}
             disabled={!canUsePlayPause}
             onClick={() => {
@@ -1581,6 +2243,108 @@ function LocalMusicBigPictureRoute() {
     return () => releaseFullscreenChromeSuppression();
   }, []);
   return <LocalMusicBigPicture onExit={navigateBackFromBigPicture} onOpenVisualizer={navigateToFullscreen} onOpenSettings={navigateToFullscreenSettings} />;
+}
+
+function YouTubeMusicBigPictureRoute() {
+  useLayoutEffect(() => {
+    retainFullscreenChromeSuppression();
+    return () => releaseFullscreenChromeSuppression();
+  }, []);
+  return <YouTubeMusicBigPicture onExit={navigateBackFromBigPicture} onOpenVisualizer={navigateToFullscreen} onOpenSettings={navigateToFullscreenSettings} />;
+}
+
+// Plain stacked option buttons (one under another) with a check on the active
+// one. We deliberately avoid a Steam modal/dropdown: in the QAM it could pop the
+// route back to the plugin start and in Big Picture the reopened modal was
+// invisible. A simple focusable list is reliable everywhere and gamepad-friendly.
+function SettingsChoiceButton(props: {
+  options: { key: string; label: string }[];
+  current: string;
+  onSelect: (key: string) => void;
+}) {
+  return (
+    <Focusable style={{ ...centeredColumnStyle, gap: "6px" }} flow-children="vertical">
+      {props.options.map((option) => (
+        <DialogButton
+          key={option.key}
+          style={{ ...wideButtonStyle, opacity: props.current === option.key ? 1 : 0.58 }}
+          onClick={() => props.onSelect(option.key)}
+        >
+          <span style={settingsButtonContentStyle}>
+            <span>{option.label}</span>
+            <span style={settingsCheckStyle}>{props.current === option.key ? <FaCheck /> : null}</span>
+          </span>
+        </DialogButton>
+      ))}
+    </Focusable>
+  );
+}
+
+function ParticleResolutionSelector() {
+  const t = useTranslations();
+  const options = [
+    { data: "1", label: "1×" },
+    { data: "1.5", label: "1.5×" },
+    { data: "2", label: "2×" },
+    { data: "3", label: "3×" },
+  ];
+  const [current, setCurrent] = useState<string>(() => {
+    try { return window.localStorage.getItem(PARTICLE_RESOLUTION_KEY) || "2"; } catch { return "2"; }
+  });
+  const choose = (value: string) => {
+    setCurrent(value);
+    try { window.localStorage.setItem(PARTICLE_RESOLUTION_KEY, value); } catch { /* storage unavailable */ }
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(PARTICLE_RESOLUTION_EVENT));
+    void particlePixelRatio();
+  };
+  return (
+    <>
+      <div style={{ height: "12px" }} />
+      <div style={{ ...settingsGroupLabelStyle, marginBottom: "6px" }}>{t.settingsParticleResolution}</div>
+      <SettingsChoiceButton options={options.map((option) => ({ key: option.data, label: option.label }))} current={current} onSelect={choose} />
+    </>
+  );
+}
+
+// Fullscreen-effect chooser shared by the QAM and fullscreen settings menus.
+// A Steam modal is used instead of a context menu: context-menu teardown can
+// pop the QAM route or strand focus in Big Picture after closing the selector.
+function FullscreenEffectDropdown(props: { value: FullscreenEffectKey; onChange: (key: FullscreenEffectKey) => void }) {
+  const t = useTranslations();
+  return (
+    <SettingsChoiceButton
+      options={fullscreenEffects.map((effect) => ({ key: effect.key, label: formatEffectLabel(t, effect.key) }))}
+      current={props.value}
+      onSelect={(key) => props.onChange(key as FullscreenEffectKey)}
+    />
+  );
+}
+
+// The fullscreen controller-command legend, shared by the QAM and fullscreen
+// settings menus so both list the same mappings.
+function FullscreenControlsLegend() {
+  const t = useTranslations();
+  return (
+    <div style={{ width: "100%", padding: "10px 12px", boxSizing: "border-box", borderRadius: "8px", background: "rgba(255,255,255,0.045)", border: "1px solid rgba(255,255,255,0.08)", fontSize: "0.78em", lineHeight: 1.5 }}>
+      {([
+        [["LB", "RB"], t.fsLegendEffect],
+        [["X"], t.fsLegendView],
+        [["Y"], t.fsLegendCover],
+        [["LT"], t.fsLegendPrev],
+        [["RT"], t.fsLegendNext],
+        [["R3"], t.fsLegendPlayPause],
+        [["↑", "↓"], t.fsLegendRotate],
+        [["←", "→"], t.fsLegendWake],
+      ] as [string[], string][]).map(([buttons, label], index) => (
+        <div key={index} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 0", borderTop: index === 0 ? undefined : "1px solid rgba(255,255,255,0.06)" }}>
+          <span style={{ display: "flex", gap: "4px", flexWrap: "wrap", minWidth: "92px" }}>
+            {buttons.map((b) => <span key={b} style={legendChipStyle}>{b}</span>)}
+          </span>
+          <span style={{ flex: 1, opacity: 0.86 }}>{label}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function FullscreenSettingsRoute() {
@@ -1628,8 +2392,11 @@ function FullscreenSettingsRoute() {
   }, [leaveSettings]);
 
   const toggleApp = (key: MusicAppKey) => {
-    if (key === "localMusic") void python.pauseExternalPlayback().catch(() => false);
-    else localAudioPlayer.stop();
+    if (key === "localMusic" || key === "youtubeMusic") {
+      const playingSource = String(localAudioPlayer.getSnapshot().track?.sourceKey ?? "localMusic");
+      if (playingSource !== key) localAudioPlayer.stop();
+      void python.pauseExternalPlayback().catch(() => false);
+    } else localAudioPlayer.stop();
     const next: MusicAppKey[] = [key];
     sourceChangedRef.current = key !== initialServiceRef.current;
     setEnabledAppKeys(next);
@@ -1742,7 +2509,7 @@ function FullscreenSettingsRoute() {
         </DialogButton>
         <div style={{ marginBottom: "26px" }}>
           <h1 style={{ margin: 0, fontSize: "42px", letterSpacing: "-.035em" }}>{settingsLabel}</h1>
-          <div style={{ marginTop: 4, opacity: .52 }}>Now Playing 2.1.0</div>
+          <div style={{ marginTop: 4, opacity: .52 }}>Now Playing 2.2.0</div>
         </div>
 
         <Focusable className="npSettingsGrid" flow-children="grid">
@@ -1754,6 +2521,7 @@ function FullscreenSettingsRoute() {
                 const active = enabledAppKeys[0] === app.key;
                 return <DialogButton key={app.key} style={{ ...optionButton, opacity: active ? 1 : .58 }} onClick={() => toggleApp(app.key)}><span style={optionContent}><Icon /><span>{appDisplayLabel(app, t)}</span><span style={{ marginLeft: "auto" }}>{active ? <FaCheck /> : null}</span></span></DialogButton>;
               })}
+              <div style={{ marginTop: "14px" }}><SurroundUpmixControls /></div>
               <div style={{ margin: "14px 2px 7px", opacity: .62, lineHeight: 1.4 }}>{t.autoLaunchSourcesDescription}</div>
               <DialogButton style={{ ...optionButton, opacity: sourceBehavior.autoLaunch ? 1 : .58 }} onClick={() => void updateSourceBehavior({ ...sourceBehavior, autoLaunch: !sourceBehavior.autoLaunch })}><span style={optionContent}><span>{t.autoLaunchSources}</span><span style={{ marginLeft: "auto" }}>{sourceBehavior.autoLaunch ? <FaCheck /> : null}</span></span></DialogButton>
               <div style={{ margin: "8px 2px 7px", opacity: .62, lineHeight: 1.4 }}>{t.closeSourcesOnSwitchDescription}</div>
@@ -1771,10 +2539,13 @@ function FullscreenSettingsRoute() {
 
             <section className="npSettingsCard" style={card}>
               <h2 style={heading}>{t.settingsFullscreenEffect}</h2>
-              {fullscreenEffects.map((effect) => {
-                const active = fullscreenEffect === effect.key;
-                return <DialogButton key={effect.key} style={{ ...optionButton, opacity: active ? 1 : .58 }} onClick={() => selectEffect(effect.key)}><span style={optionContent}><span>{formatEffectLabel(t, effect.key)}</span><span style={{ marginLeft: "auto" }}>{active ? <FaCheck /> : null}</span></span></DialogButton>;
-              })}
+              <FullscreenEffectDropdown value={fullscreenEffect} onChange={selectEffect} />
+              <ParticleResolutionSelector />
+            </section>
+
+            <section className="npSettingsCard" style={card}>
+              <h2 style={heading}>{t.settingsFullscreenControls}</h2>
+              <FullscreenControlsLegend />
             </section>
 
             <section className="npSettingsCard" style={card}>
@@ -1791,6 +2562,7 @@ function FullscreenSettingsRoute() {
           <Focusable className="npSettingsColumn" flow-children="vertical">
             <section className="npSettingsCard" style={card}><LocalMusicSettingsPanel selectedService={enabledAppKeys[0] ?? "localMusic"} /></section>
             <section className="npSettingsCard" style={card}><SpotifyPlusSettingsPanel selectedService={enabledAppKeys[0] ?? "localMusic"} onSettingsChanged={() => {}} /></section>
+            <section className="npSettingsCard" style={card}><YouTubeMusicSettingsPanel selectedService={enabledAppKeys[0] ?? "localMusic"} /></section>
             <section className="npSettingsCard" style={card}><FanartSettingsPanel /></section>
           </Focusable>
         </Focusable>
@@ -1958,22 +2730,6 @@ function SettingsView(props: {
               })}
             </Focusable>
 
-            <div style={{ margin: "12px 3px 6px", fontSize: ".72em", lineHeight: 1.4, opacity: .58 }}>{t.autoLaunchSourcesDescription}</div>
-            <DialogButton style={{ ...wideButtonStyle, height: "54px", minHeight: "54px", lineHeight: 1.25, opacity: sourceBehavior.autoLaunch ? 1 : .58 }} onClick={() => void updateSourceBehavior({ ...sourceBehavior, autoLaunch: !sourceBehavior.autoLaunch })}>
-              <span style={{ ...settingsButtonContentStyle, minHeight: "54px", whiteSpace: "normal", lineHeight: 1.25 }}><span>{t.autoLaunchSources}</span><span style={settingsCheckStyle}>{sourceBehavior.autoLaunch ? <FaCheck /> : null}</span></span>
-            </DialogButton>
-            <div style={{ margin: "8px 3px 6px", fontSize: ".72em", lineHeight: 1.4, opacity: .58 }}>{t.closeSourcesOnSwitchDescription}</div>
-            <DialogButton style={{ ...wideButtonStyle, height: "54px", minHeight: "54px", lineHeight: 1.25, opacity: sourceBehavior.closeOnSwitch ? 1 : .58 }} onClick={() => void updateSourceBehavior({ ...sourceBehavior, closeOnSwitch: !sourceBehavior.closeOnSwitch })}>
-              <span style={{ ...settingsButtonContentStyle, minHeight: "54px", whiteSpace: "normal", lineHeight: 1.25 }}><span>{t.closeSourcesOnSwitch}</span><span style={settingsCheckStyle}>{sourceBehavior.closeOnSwitch ? <FaCheck /> : null}</span></span>
-            </DialogButton>
-
-            <LocalMusicSettingsPanel selectedService={props.enabledAppKeys[0] ?? "localMusic"} />
-            <SpotifyPlusSettingsPanel
-              selectedService={props.enabledAppKeys[0] ?? "localMusic"}
-              onSettingsChanged={props.onSpotifySettingsChanged}
-            />
-            <FanartSettingsPanel />
-
             <div style={{ height: "12px" }} />
             <div style={{ ...settingsGroupLabelStyle, marginBottom: "6px" }}>
               {t.settingsCoverSource}
@@ -2005,25 +2761,13 @@ function SettingsView(props: {
             <div style={{ ...settingsGroupLabelStyle, marginBottom: "6px" }}>
               {t.settingsFullscreenEffect}
             </div>
+            <FullscreenEffectDropdown value={props.fullscreenEffect} onChange={props.onSelectFullscreenEffect} />
 
-            <Focusable style={{ ...centeredColumnStyle, gap: "6px" }} flow-children="vertical">
-              {fullscreenEffects.map((effect) => {
-                const isSelected = props.fullscreenEffect === effect.key;
+            <ParticleResolutionSelector />
 
-                return (
-                  <DialogButton
-                    key={effect.key}
-                    style={{ ...wideButtonStyle, opacity: isSelected ? 1 : 0.58 }}
-                    onClick={() => props.onSelectFullscreenEffect(effect.key)}
-                  >
-                    <span style={settingsButtonContentStyle}>
-                      <span>{formatEffectLabel(t, effect.key)}</span>
-                      <span style={settingsCheckStyle}>{isSelected ? <FaCheck /> : null}</span>
-                    </span>
-                  </DialogButton>
-                );
-              })}
-            </Focusable>
+            <div style={{ height: "12px" }} />
+            <div style={{ ...settingsGroupLabelStyle, marginBottom: "6px" }}>{t.settingsFullscreenControls}</div>
+            <FullscreenControlsLegend />
 
             <div style={{ height: "12px" }} />
             <div style={{ ...settingsGroupLabelStyle, marginBottom: "6px" }}>{t.topbarSection}</div>
@@ -2052,6 +2796,28 @@ function SettingsView(props: {
                 </span>
               </DialogButton>
             </Focusable>
+
+            <div style={{ height: "12px" }} />
+            <div style={{ height: "12px" }} />
+            <SurroundUpmixControls />
+            <div style={{ height: "12px" }} />
+            <div style={{ margin: "12px 3px 6px", fontSize: ".72em", lineHeight: 1.4, opacity: .58 }}>{t.autoLaunchSourcesDescription}</div>
+            <DialogButton style={{ ...wideButtonStyle, height: "54px", minHeight: "54px", lineHeight: 1.25, opacity: sourceBehavior.autoLaunch ? 1 : .58 }} onClick={() => void updateSourceBehavior({ ...sourceBehavior, autoLaunch: !sourceBehavior.autoLaunch })}>
+              <span style={{ ...settingsButtonContentStyle, minHeight: "54px", whiteSpace: "normal", lineHeight: 1.25 }}><span>{t.autoLaunchSources}</span><span style={settingsCheckStyle}>{sourceBehavior.autoLaunch ? <FaCheck /> : null}</span></span>
+            </DialogButton>
+            <div style={{ margin: "8px 3px 6px", fontSize: ".72em", lineHeight: 1.4, opacity: .58 }}>{t.closeSourcesOnSwitchDescription}</div>
+            <DialogButton style={{ ...wideButtonStyle, height: "54px", minHeight: "54px", lineHeight: 1.25, opacity: sourceBehavior.closeOnSwitch ? 1 : .58 }} onClick={() => void updateSourceBehavior({ ...sourceBehavior, closeOnSwitch: !sourceBehavior.closeOnSwitch })}>
+              <span style={{ ...settingsButtonContentStyle, minHeight: "54px", whiteSpace: "normal", lineHeight: 1.25 }}><span>{t.closeSourcesOnSwitch}</span><span style={settingsCheckStyle}>{sourceBehavior.closeOnSwitch ? <FaCheck /> : null}</span></span>
+            </DialogButton>
+
+            <div style={{ height: "12px" }} />
+            <LocalMusicSettingsPanel selectedService={props.enabledAppKeys[0] ?? "localMusic"} />
+            <SpotifyPlusSettingsPanel
+              selectedService={props.enabledAppKeys[0] ?? "localMusic"}
+              onSettingsChanged={props.onSpotifySettingsChanged}
+            />
+            <YouTubeMusicSettingsPanel selectedService={props.enabledAppKeys[0] ?? "localMusic"} />
+            <FanartSettingsPanel />
 
             <div style={{ height: "12px" }} />
             <div style={{ ...settingsGroupLabelStyle, marginBottom: "6px" }}>
@@ -2185,6 +2951,7 @@ function Content() {
   const [loading, setLoading] = useState<boolean>(true);
   const [busy, setBusy] = useState<boolean>(false);
   const [coverUrl, setCoverUrl] = useState<string>("");
+  const [useDarkCoverMetadata, setUseDarkCoverMetadata] = useState<boolean>(false);
   const [coverResolving, setCoverResolving] = useState<boolean>(false);
   const [appVolume, setAppVolume] = useState<number>(100);
   const [volumeReady, setVolumeReady] = useState<boolean>(false);
@@ -2239,6 +3006,15 @@ function Content() {
 
   useEffect(() => {
     let cancelled = false;
+    setUseDarkCoverMetadata(false);
+    void coverNeedsDarkMetadata(coverUrl).then((needsDark) => {
+      if (!cancelled) setUseDarkCoverMetadata(needsDark);
+    });
+    return () => { cancelled = true; };
+  }, [coverUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
     let timer = 0;
     const syncBackendSource = async () => {
       try {
@@ -2268,7 +3044,7 @@ function Content() {
   }, []);
 
   useEffect(() => {
-    if (activeServiceKey === "localMusic") {
+    if (activeServiceKey === "localMusic" || activeServiceKey === "youtubeMusic") {
       setActiveAppRunning(false);
       return;
     }
@@ -2353,8 +3129,10 @@ function Content() {
     // Enforce one playback source even when the setting changed from the
     // fullscreen route or while QAM was unmounted. The backend serializes app
     // lifecycle changes; the frontend only restores the local player snapshot.
-    if (activeService === "localMusic") {
-      const saved = getSavedSourceVolume("localMusic", localAudioPlayer.getSnapshot().volume);
+    if (activeService === "localMusic" || activeService === "youtubeMusic") {
+      const playingSource = String(localAudioPlayer.getSnapshot().track?.sourceKey ?? "localMusic");
+      if (playingSource !== activeService) localAudioPlayer.stop();
+      const saved = getSavedSourceVolume(sourceVolumeStorageKey(activeService), localAudioPlayer.getSnapshot().volume);
       volumeValueRef.current = saved;
       setAppVolume(saved);
       setVolumeReady(true);
@@ -2390,7 +3168,7 @@ function Content() {
   const spotifyPaused = spotifyApiActive && spotifyApiStatus.active;
   const stableMediaKey = spotifyPaused ? "spotify-api-paused" : mediaKey;
   const spotifyCoverActive = spotifyApiActive && !spotifyPaused;
-  const localCoverActive = activeServiceKey === "localMusic" && Boolean(current?.title);
+  const localCoverActive = (activeServiceKey === "localMusic" || activeServiceKey === "youtubeMusic") && Boolean(current?.title);
 
   useEffect(() => {
     const syncSharedSpotifyPlayback = (event: Event) => {
@@ -2415,13 +3193,20 @@ function Content() {
 
     refreshingRef.current = true;
     try {
-      if (activeServiceKey === "localMusic") {
+      if (activeServiceKey === "localMusic" || activeServiceKey === "youtubeMusic") {
         const local = localAudioPlayer.getSnapshot();
-        const track = local.track;
+        // Local music and YouTube Music share the same in-browser player, so the
+        // held track can belong to the other source. Ignore it unless its
+        // sourceKey matches the active service, otherwise returning to Your Music
+        // shows the last YouTube Music song (and vice-versa).
+        const rawTrack = local.track;
+        const track = rawTrack && String(rawTrack.sourceKey ?? "localMusic") === activeServiceKey ? rawTrack : null;
         const artist = Array.isArray(track?.artists) ? track.artists.map((value: any) => value?.name).filter(Boolean).join(", ") : "";
+        const images = Array.isArray(track?.images) && track.images.length ? track.images : track?.album?.images;
+        const artworkUrl = Array.isArray(images) ? String(images[images.length - 1]?.url ?? "") : "";
         const player: PlayerSnapshot | null = track ? {
-          id: "localMusic",
-          name: t.localMusicLabel,
+          id: activeServiceKey,
+          name: activeServiceKey === "youtubeMusic" ? "YouTube Music" : t.localMusicLabel,
           title: String(track?.name ?? ""),
           artist,
           album: String(track?.album?.name ?? ""),
@@ -2439,6 +3224,7 @@ function Content() {
           canRepeat: true,
           shuffleActive: local.shuffleActive,
           repeatMode: local.repeatMode === "All" ? "List" : local.repeatMode === "One" ? "Track" : "Off",
+          artworkUrl,
         } : null;
         const nextSnapshot: Snapshot = { selectedPlayer: player?.id ?? "", currentPlayer: player?.id ?? "", selected: player, players: player ? [player] : [] };
         const sampledAt = Date.now();
@@ -2514,7 +3300,7 @@ function Content() {
     setSnapshotAt(Date.now());
   }
 
-  const isLocalMusicActive = enabledAppKeys[0] === "localMusic";
+  const isLocalMusicActive = enabledAppKeys[0] === "localMusic" || enabledAppKeys[0] === "youtubeMusic";
   const isSpotifyApiActive = spotifyApiActive;
 
   function previousAction(): Promise<unknown> {
@@ -2540,14 +3326,14 @@ function Content() {
   async function runAction(
     action: () => Promise<unknown>,
     optimistic?: () => void,
-    spotifyRefreshDelays: number[] = [260, 900, 1800]
+    spotifyRefreshDelays: number[] = [260]
   ) {
     const blockUi = !isSpotifyApiActive;
     if (blockUi) setBusy(true);
     optimistic?.();
 
     const pending = action();
-    const delays = isSpotifyApiActive ? spotifyRefreshDelays : [45, 130, 320, 720, 1450];
+    const delays = isSpotifyApiActive ? spotifyRefreshDelays : isLocalMusicActive ? [30] : [45, 130, 320, 720, 1450];
     delays.forEach((delay) => {
       window.setTimeout(() => void refresh(true), delay);
     });
@@ -2579,7 +3365,8 @@ function Content() {
 
   function toggleEnabledApp(key: MusicAppKey) {
     sourceInteractionAtRef.current = Date.now();
-    if (key === "localMusic") {
+    if (key === "localMusic" || key === "youtubeMusic") {
+      if (isLocalMusicActive && activeServiceKey !== key) localAudioPlayer.stop();
       void python.pauseExternalPlayback().catch(() => false);
     } else {
       localAudioPlayer.stop();
@@ -2716,16 +3503,16 @@ function Content() {
     volumeApplyTimersRef.current = [];
     volumeAppliedRef.current = false;
 
-    const fallback = activeServiceKey === "localMusic" ? localAudioPlayer.getSnapshot().volume : 100;
+    const fallback = isLocalMusicActive ? localAudioPlayer.getSnapshot().volume : 100;
     const saved = getSavedSourceVolume(sourceVolumeStorageKey(activeServiceKey), fallback);
     volumeValueRef.current = saved;
     setAppVolume(saved);
-    setVolumeReady(activeServiceKey === "localMusic");
+    setVolumeReady(isLocalMusicActive);
 
     const initializeVolume = async () => {
       if (cancelled) return;
       try {
-        if (activeServiceKey === "localMusic") {
+        if (isLocalMusicActive) {
           await localAudioPlayer.initialize();
           if (cancelled) return;
           localAudioPlayer.setVolume(volumeValueRef.current);
@@ -2761,7 +3548,7 @@ function Content() {
       }
     };
 
-    const delays = activeServiceKey === "localMusic"
+    const delays = isLocalMusicActive
       ? [0]
       : [0, 1400, 4200];
     volumeApplyTimersRef.current = delays.map((delay) => window.setTimeout(() => void initializeVolume(), delay));
@@ -2771,14 +3558,14 @@ function Content() {
       volumeApplyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
       volumeApplyTimersRef.current = [];
     };
-  }, [activeServiceKey, spotifyApiActive, spotifySettingsReady]);
+  }, [activeServiceKey, isLocalMusicActive, spotifyApiActive, spotifySettingsReady]);
 
   useEffect(() => {
-    if (activeServiceKey !== "localMusic") return;
+    if (!isLocalMusicActive) return;
     return localAudioPlayer.subscribe(() => {
       void refresh(true);
     });
-  }, [activeServiceKey]);
+  }, [activeServiceKey, isLocalMusicActive]);
 
   useEffect(() => {
     const syncVolume = (event: Event) => {
@@ -2900,7 +3687,7 @@ function Content() {
         volumeAppliedRef.current = true;
         setVolumeReady(true);
         // Do not snap the thumb backwards if a newer key/gamepad repeat arrived
-        // while AppVolumeBridge was applying the previous value.
+        // while the previous source-volume request was still being applied.
         if (volumeValueRef.current === requested) {
           const confirmed = clamp(result.volume, 0, 100);
           // Some Windows audio sessions briefly report their creation default
@@ -3084,10 +3871,12 @@ function Content() {
 
     (async () => {
       try {
-        const localTrack = activeServiceKey === "localMusic" ? localAudioPlayer.getSnapshot().track : null;
-        const url = localTrack?.coverId
+        const localTrack = isLocalMusicActive ? localAudioPlayer.getSnapshot().track : null;
+        const images = Array.isArray(localTrack?.images) && localTrack.images.length ? localTrack.images : localTrack?.album?.images;
+        const directImage = Array.isArray(images) ? String(images[images.length - 1]?.url ?? "") : "";
+        const url = directImage || (localTrack?.coverId
           ? await python.getLocalMusicCover(String(localTrack.coverId))
-          : await python.getCoverForService(activeService, title, artist, album);
+          : await python.getCoverForService(activeService, title, artist, album));
         if (cancelled || requestId !== coverRequestRef.current) return;
         if (!url) {
           setCoverResolving(false);
@@ -3105,7 +3894,7 @@ function Content() {
     return () => {
       cancelled = true;
     };
-  }, [current?.title, current?.artist, current?.album, current?.artworkUrl, coverSource, spotifyCoverActive, activeServiceKey, t.coverFailed]);
+  }, [current?.title, current?.artist, current?.album, current?.artworkUrl, coverSource, spotifyCoverActive, activeServiceKey, isLocalMusicActive, t.coverFailed]);
 
   useEffect(() => () => {
     if (coverClearTimerRef.current) window.clearTimeout(coverClearTimerRef.current);
@@ -3321,7 +4110,7 @@ function Content() {
           ref={qamRootRef}
           style={{ ...qamCenterRowStyle, ["--np-accent" as any]: accentForKey(enabledAppKeys[0]) }}
         >
-          <QamGlowLayer artUrl={coverUrl} playing={isPlaying} bottomFadeTop={bottomGlowFadeTop} />
+          <QamGlowLayer artUrl={coverUrl || coverUrlRef.current} playing={isPlaying} bottomFadeTop={bottomGlowFadeTop} />
           <div style={{ ...centeredColumnStyle, position: "relative", zIndex: 3 }}>
             <div style={mediaTransitionStyle}>
               <CoverBox
@@ -3346,6 +4135,7 @@ function Content() {
                 <ScrollingText
                   text={title}
                   style={{
+                    color: useDarkCoverMetadata ? "#1A1A1A" : undefined,
                     fontSize: "1.08em",
                     fontWeight: 700,
                     lineHeight: 1.2,
@@ -3356,6 +4146,7 @@ function Content() {
                 <ScrollingText
                   text={artist}
                   style={{
+                    color: useDarkCoverMetadata ? "#1A1A1A" : undefined,
                     opacity: 0.84,
                     lineHeight: 1.2,
                     marginBottom: "4px",
@@ -3365,6 +4156,7 @@ function Content() {
                 <ScrollingText
                   text={album}
                   style={{
+                    color: useDarkCoverMetadata ? "#1A1A1A" : undefined,
                     opacity: 0.62,
                     fontSize: "0.9em",
                     lineHeight: 1.2,
@@ -3562,12 +4354,19 @@ function Content() {
               </>
             ) : null}
 
+            {enabledAppKeys[0] === "youtubeMusic" ? (
+              <>
+                <div style={{ height: "10px" }} />
+                <YouTubeMusicBrowser onOpenBigPicture={navigateToYouTubeMusicBigPicture} onOpenSettings={() => setShowSettings(true)} />
+              </>
+            ) : null}
+
             {enabledApps.length > 0 ? (
               <>
                 <div style={{ height: "6px" }} />
 
                 <Focusable style={{ ...centeredColumnStyle, gap: "6px" }} flow-children="vertical">
-                  {enabledApps.filter((app) => app.key !== "localMusic" && app.key !== "spotify").map((app) => {
+                  {enabledApps.filter((app) => app.key !== "localMusic" && app.key !== "spotify" && app.key !== "youtubeMusic").map((app) => {
                     const Icon = app.Icon;
 
                     return (
@@ -3628,6 +4427,7 @@ export default definePlugin(() => {
   routerHook.addRoute(FULLSCREEN_ROUTE, FullscreenRoute);
   routerHook.addRoute(SPOTIFY_BIG_PICTURE_ROUTE, SpotifyBigPictureRoute);
   routerHook.addRoute(LOCAL_MUSIC_BIG_PICTURE_ROUTE, LocalMusicBigPictureRoute);
+  routerHook.addRoute(YOUTUBE_MUSIC_BIG_PICTURE_ROUTE, YouTubeMusicBigPictureRoute);
   routerHook.addRoute(FULLSCREEN_SETTINGS_ROUTE, FullscreenSettingsRoute);
 
   return {
@@ -3640,6 +4440,7 @@ export default definePlugin(() => {
       routerHook.removeRoute(FULLSCREEN_ROUTE);
       routerHook.removeRoute(SPOTIFY_BIG_PICTURE_ROUTE);
       routerHook.removeRoute(LOCAL_MUSIC_BIG_PICTURE_ROUTE);
+      routerHook.removeRoute(YOUTUBE_MUSIC_BIG_PICTURE_ROUTE);
       routerHook.removeRoute(FULLSCREEN_SETTINGS_ROUTE);
     },
   };

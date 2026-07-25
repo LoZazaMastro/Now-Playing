@@ -1,0 +1,109 @@
+# Translations for ytmusicapi
+# Copyright (C) 2023 sigma67
+# This file is distributed under the same license as ytmusicapi
+# sigma67 <ytmusicapi@gmail.com>
+# 
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-03-13 20:07+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: Bruce Zhang <zttt183525594@gmail.com>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: parsers/i18n.py:32
+msgid "album"
+msgstr "专辑"
+
+#: parsers/i18n.py:33
+msgid "artist"
+msgstr "音乐人"
+
+#: parsers/i18n.py:34
+msgid "playlist"
+msgstr "播放列表"
+
+#: parsers/i18n.py:35
+msgid "song"
+msgstr "歌曲"
+
+#: parsers/i18n.py:36
+msgid "video"
+msgstr "视频"
+
+#: parsers/i18n.py:37
+msgid "station"
+msgstr "电台"
+
+#: parsers/i18n.py:38
+msgid "profile"
+msgstr "个人资料"
+
+#: parsers/i18n.py:39
+msgid "podcast"
+msgstr "播客"
+
+#: parsers/i18n.py:40
+msgid "episode"
+msgstr "分集"
+
+#: parsers/i18n.py:46
+msgid "single"
+msgstr "单曲"
+
+#: parsers/i18n.py:47
+msgid "ep"
+msgstr "迷你专辑"
+
+#: parsers/i18n.py:55
+msgid "performed_by"
+msgstr "表演者"
+
+#: parsers/i18n.py:56
+msgid "written_by"
+msgstr "词曲作者"
+
+#: parsers/i18n.py:57
+msgid "produced_by"
+msgstr "制作人"
+
+#: parsers/i18n.py:58
+msgid "music_metadata_provided_by"
+msgstr "音乐元数据提供者"
+
+#: parsers/i18n.py:64
+msgid "albums"
+msgstr "专辑"
+
+#: parsers/i18n.py:65
+msgid "singles & eps"
+msgstr "单曲和迷你专辑"
+
+#: parsers/i18n.py:66
+msgid "shows"
+msgstr "有声读物和节目"
+
+#: parsers/i18n.py:67
+msgid "videos"
+msgstr "视频"
+
+#: parsers/i18n.py:68
+msgid "playlists"
+msgstr "精选"
+
+#: parsers/i18n.py:69
+msgid "related"
+msgstr "粉丝可能还会喜欢"
+
+#: parsers/i18n.py:70
+msgid "episodes"
+msgstr "最新分集"
+
+#: parsers/i18n.py:71
+msgid "podcasts"
+msgstr "播客"

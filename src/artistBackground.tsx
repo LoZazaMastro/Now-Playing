@@ -13,7 +13,7 @@ export function ArtistBackgroundPicker({
   onBack,
   onApplied,
 }: {
-  provider: "local" | "spotify";
+  provider: "local" | "spotify" | "youtubeMusic";
   artistId: string;
   artistName: string;
   onBack: () => void;
@@ -27,7 +27,7 @@ export function ArtistBackgroundPicker({
   const [failedPreviews, setFailedPreviews] = useState<Record<string, boolean>>({});
   const [loadedPreviews, setLoadedPreviews] = useState<Record<string, string>>({});
   const searchRevisionRef = useRef(0);
-  const accent = provider === "spotify" ? "#1DB954" : "#D9A337";
+  const accent = provider === "spotify" ? "#1DB954" : provider === "youtubeMusic" ? "#ff0033" : "#D9A337";
 
   const search = useCallback(async () => {
     const revision = ++searchRevisionRef.current;

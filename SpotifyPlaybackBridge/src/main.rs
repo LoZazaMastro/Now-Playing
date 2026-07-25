@@ -3,21 +3,23 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     path::PathBuf,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use librespot::{
-    connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Spirc},
+    connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc},
     core::{Session, SessionConfig, authentication::Credentials, cache::Cache},
     metadata::audio::UniqueFields,
     playback::{
-        audio_backend,
+        audio_backend::{self, Sink, SinkResult},
         config::{AudioFormat, Bitrate, PlayerConfig},
+        convert::Converter,
+        decoder::AudioPacket,
         mixer::{self, MixerConfig},
         player::{Player, PlayerEvent},
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::form_urlencoded;
 
@@ -36,6 +38,7 @@ struct Snapshot {
     position: u32,
     length: u32,
     volume: u8,
+    audio_level: f32,
     shuffle_active: bool,
     repeat_mode: String,
     error: String,
@@ -55,11 +58,59 @@ impl Default for Snapshot {
             position: 0,
             length: 0,
             volume: 100,
+            audio_level: 0.0,
             media_type: String::new(),
             shuffle_active: false,
             repeat_mode: "Off".into(),
             error: String::new(),
         }
+    }
+}
+
+struct MeteredSink {
+    inner: Box<dyn Sink>,
+    state: Arc<RwLock<Snapshot>>,
+    last_sample: Instant,
+}
+
+impl MeteredSink {
+    fn new(inner: Box<dyn Sink>, state: Arc<RwLock<Snapshot>>) -> Self {
+        Self {
+            inner,
+            state,
+            last_sample: Instant::now() - Duration::from_millis(50),
+        }
+    }
+}
+
+impl Sink for MeteredSink {
+    fn start(&mut self) -> SinkResult<()> {
+        self.inner.start()
+    }
+
+    fn stop(&mut self) -> SinkResult<()> {
+        self.state.write().unwrap().audio_level = 0.0;
+        self.inner.stop()
+    }
+
+    fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
+        if self.last_sample.elapsed() >= Duration::from_millis(32) {
+            if let Ok(samples) = packet.samples() {
+                let mut sum = 0.0;
+                let mut count = 0usize;
+                for sample in samples.iter().step_by(4) {
+                    sum += sample * sample;
+                    count += 1;
+                }
+                if count > 0 {
+                    let measured = ((sum / count as f64).sqrt() * 3.2).clamp(0.0, 1.0) as f32;
+                    let mut snapshot = self.state.write().unwrap();
+                    snapshot.audio_level = snapshot.audio_level * 0.55 + measured * 0.45;
+                }
+            }
+            self.last_sample = Instant::now();
+        }
+        self.inner.write(packet, converter)
     }
 }
 
@@ -86,8 +137,15 @@ fn query_value(url: &str, key: &str) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
+#[derive(Deserialize)]
+struct LoadTracksBody {
+    uris: Vec<String>,
+    #[serde(default)]
+    start_index: usize,
+}
+
 fn handle_request(
-    request: Request,
+    mut request: Request,
     secret: &str,
     state: &Arc<RwLock<Snapshot>>,
     spirc: &Arc<Spirc>,
@@ -119,6 +177,7 @@ fn handle_request(
     let mut optimistic_status: Option<(&str, bool)> = None;
     let mut optimistic_shuffle: Option<bool> = None;
     let mut optimistic_repeat: Option<String> = None;
+    let mut optimistic_volume: Option<u8> = None;
     let result = match path {
         "/action/play" => {
             optimistic_status = Some(("Playing", true));
@@ -176,6 +235,7 @@ fn handle_request(
                 .and_then(|value| value.parse::<u8>().ok())
                 .unwrap_or(current.volume)
                 .min(100);
+            optimistic_volume = Some(volume);
             spirc.set_volume(((volume as u32 * u16::MAX as u32) / 100) as u16)
         }
         "/action/seek" => {
@@ -186,18 +246,58 @@ fn handle_request(
         }
         "/action/load" => {
             let uri = query_value(request.url(), "uri").unwrap_or_default();
+            let context_uri = query_value(request.url(), "context").unwrap_or_default();
+            let offset_uri = query_value(request.url(), "offset").unwrap_or_default();
             if uri.is_empty() {
                 Err(librespot::core::Error::invalid_argument("uri"))
             } else {
                 spirc.activate().and_then(|_| {
                     spirc.load(LoadRequest::from_context_uri(
-                        uri,
+                        if context_uri.is_empty() { uri.clone() } else { context_uri },
                         LoadRequestOptions {
                             start_playing: true,
+                            playing_track: if offset_uri.is_empty() {
+                                None
+                            } else {
+                                Some(PlayingTrack::Uri(offset_uri))
+                            },
                             ..Default::default()
                         },
                     ))
                 })
+            }
+        }
+        "/action/load-tracks" => {
+            let mut body = String::new();
+            let parsed = request
+                .as_reader()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<LoadTracksBody>(&body).ok());
+            if let Some(payload) = parsed {
+                let tracks: Vec<String> = payload
+                    .uris
+                    .into_iter()
+                    .filter(|uri| uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:"))
+                    .take(300)
+                    .collect();
+                if tracks.is_empty() {
+                    Err(librespot::core::Error::invalid_argument("uris"))
+                } else {
+                    let start_index = payload.start_index.min(tracks.len().saturating_sub(1)) as u32;
+                    spirc.activate().and_then(|_| {
+                        spirc.load(LoadRequest::from_tracks(
+                            tracks,
+                            LoadRequestOptions {
+                                start_playing: true,
+                                playing_track: Some(PlayingTrack::Index(start_index)),
+                                ..Default::default()
+                            },
+                        ))
+                    })
+                }
+            } else {
+                Err(librespot::core::Error::invalid_argument("body"))
             }
         }
         _ => {
@@ -219,6 +319,9 @@ fn handle_request(
         }
         if let Some(mode) = optimistic_repeat {
             snapshot.repeat_mode = mode;
+        }
+        if let Some(volume) = optimistic_volume {
+            snapshot.volume = volume;
         }
     }
     let _ = request.respond(json_response(
@@ -355,6 +458,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .get("audioCachePath")
         .and_then(|value| value.as_str())
         .unwrap_or("");
+    let audio_cache_size_bytes = startup
+        .get("audioCacheSizeBytes")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(5 * 1024 * 1024 * 1024);
     if access_token.is_empty() || secret.is_empty() {
         return Err("missing startup credentials".into());
     }
@@ -370,7 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None::<PathBuf>,
             None::<PathBuf>,
             Some(PathBuf::from(audio_cache_path)),
-            Some(1024 * 1024 * 1024),
+            Some(audio_cache_size_bytes),
         )?)
     };
     let session = Session::new(SessionConfig::default(), cache);
@@ -378,6 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mixer_builder = mixer::find(None).ok_or("audio mixer unavailable")?;
     let mixer = mixer_builder(MixerConfig::default())?;
     let soft_volume = mixer.get_soft_volume();
+    let meter_state = state.clone();
     let player = Player::new(
         PlayerConfig {
             bitrate: match audio_quality {
@@ -390,7 +498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
         session.clone(),
         soft_volume,
-        move || backend(None, AudioFormat::default()),
+        move || Box::new(MeteredSink::new(backend(None, AudioFormat::default()), meter_state)),
     );
     let events = player.get_player_event_channel();
     let config = ConnectConfig {
