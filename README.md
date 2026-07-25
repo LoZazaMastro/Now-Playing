@@ -30,7 +30,7 @@ Now Playing brings Spotify, YouTube Music, local files and active Windows media 
 
 Now Playing includes shortcuts and visual accents for:
 
-- **Your Music / La tua musica**, the built-in local library and player
+- **Your Music**, the built-in local library and player
 - Spotify — personal library browsing and integrated Spotify Connect playback
 - YouTube Music — Home, Search, Library and integrated playback
 - TIDAL
@@ -102,7 +102,7 @@ YouTube Music appears immediately after Spotify and provides the same Home, Sear
 
 Public search and browsing work without authentication. To unlock private library sections, select **Connect YouTube Music**. In the temporary sign-in window shown above Steam, choose your Google account or sign in with the account used for YouTube Music, then leave the window open. Now Playing completes the connection, closes the dedicated window and removes its temporary profile automatically. Credentials remain in the local Decky plugin settings directory and are never included in diagnostics. Manual request-header entry is retained only as an advanced recovery option when automatic sign-in fails.
 
-### Your Music / La tua musica
+### Your Music
 
 **Your Music** turns Now Playing into a real local music player instead of only controlling external applications. Select it from the Apps section, then add one or more music folders from Settings.
 
