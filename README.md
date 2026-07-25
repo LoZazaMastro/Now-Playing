@@ -42,6 +42,7 @@ Turn your TV or monitor into a dynamic visual experience. Choose from multiple a
 *   **LT / RT:** Skip to previous or next track.
 *   **R3:** Play or pause audio.
 *   **D-pad Up / Down:** Rotate 3D particle effects.
+
 Do you want to see the forecast in your Now Playing fullscreen visualizer? **[Be sure to download the Playhub app](https://github.com/LoZazaMastro/Playhub)** and install Weather from the Playhub Plugin Store.
 
 ### Per-Source Volume Control & Smart Switching
