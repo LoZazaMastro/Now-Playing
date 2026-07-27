@@ -3806,6 +3806,47 @@ class Plugin:
             pass
         return {"level": -1.0, "playing": False}
 
+    def _playback_activity_sync(self) -> Dict[str, Any]:
+        service = self._normalized_active_service()
+        current: Dict[str, Any] = {}
+
+        if service in {"localMusic", "youtubeMusic"}:
+            snapshot = self._local_music_snapshot_sync()
+            selected = snapshot.get("selected") if isinstance(snapshot, dict) else None
+            current = selected if isinstance(selected, dict) else {}
+        elif service == "spotify":
+            try:
+                payload = self._spotify_playback_bridge_request_sync("/snapshot", 0.55)
+                if isinstance(payload, dict) and payload.get("ready"):
+                    current = {
+                        "id": "spotify-integrated",
+                        "name": "Spotify",
+                        "title": str(payload.get("title") or ""),
+                        "status": str(payload.get("status") or "Stopped"),
+                    }
+            except Exception as exc:
+                self._log(f"playback activity bridge unavailable: {exc}")
+        else:
+            candidate = self._current_track_snapshot()
+            current = candidate if isinstance(candidate, dict) else {}
+
+        status = str(current.get("status") or "Stopped").strip()
+        return {
+            "active": status.lower() == "playing",
+            "status": status,
+            "source": service,
+            "player": str(current.get("name") or current.get("id") or ""),
+            "trackId": str(current.get("id") or current.get("title") or ""),
+            "updatedAt": int(time.time() * 1000),
+        }
+
+    async def get_playback_activity(self) -> Dict[str, Any]:
+        # This path is intentionally independent from Spotify Web API metadata.
+        # ThemeDeck only needs the authoritative Playing/Paused/Stopped state.
+        active = self._normalized_active_service()
+        executor = self._spotify_executor if active == "spotify" else self._realtime_executor
+        return await self._run_in_executor(executor, self._playback_activity_sync)
+
     async def get_snapshot(self) -> Dict[str, Any]:
         active = self._normalized_active_service()
         if active in {"localMusic", "youtubeMusic"}:

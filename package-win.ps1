@@ -24,7 +24,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "vendor") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "licenses") | Out-Null
 
 if (Test-Path (Join-Path $Root "bin/AppVolumeBridge.exe")) {
-  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.2.0 uses direct Windows Core Audio."
+  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.3.0 uses direct Windows Core Audio."
 }
 
 if (Test-Path (Join-Path $Root "node_modules")) {

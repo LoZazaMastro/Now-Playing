@@ -65,6 +65,29 @@ const LOCAL_MUSIC_BIG_PICTURE_ROUTE = "/now-playing/local-music-big-picture";
 const YOUTUBE_MUSIC_BIG_PICTURE_ROUTE = "/now-playing/youtube-music-big-picture";
 const FULLSCREEN_SETTINGS_ROUTE = "/now-playing/settings-fullscreen";
 const FULLSCREEN_CHROME_STYLE_ID = "np-fullscreen-chrome-style";
+const PLAYBACK_ACTIVITY_EVENT = "playhub:now-playing-activity";
+const PLAYBACK_ACTIVITY_GLOBAL = "__playhubNowPlayingActivity";
+let playbackActivitySequence = 0;
+
+function publishPlaybackActivity(
+  active: boolean,
+  status: string,
+  source: string,
+  player: string,
+  trackId: string,
+) {
+  const detail = {
+    active: active && status.toLowerCase() === "playing",
+    status,
+    source,
+    player,
+    trackId,
+    updatedAt: Date.now(),
+    sequence: ++playbackActivitySequence,
+  };
+  (window as any)[PLAYBACK_ACTIVITY_GLOBAL] = detail;
+  window.dispatchEvent(new CustomEvent(PLAYBACK_ACTIVITY_EVENT, { detail }));
+}
 
 const qamCenterRowStyle: CSSProperties = {
   width: "calc(100% - 12px)",
@@ -3103,6 +3126,23 @@ function Content() {
     }
     return rawCurrent;
   }, [rawCurrent, activeServiceKey]);
+
+  useEffect(() => {
+    const publish = () => {
+      const status = String(current?.status || "Stopped");
+      publishPlaybackActivity(
+        status.toLowerCase() === "playing",
+        status,
+        activeServiceKey,
+        String(current?.name || current?.id || ""),
+        String(current?.id || current?.title || ""),
+      );
+    };
+    publish();
+    const heartbeat = window.setInterval(publish, 2000);
+    return () => window.clearInterval(heartbeat);
+  }, [activeServiceKey, current?.status, current?.name, current?.id, current?.title]);
+
   const enabledApps = useMemo(
     () => musicApps.filter((app) => app.key === activeServiceKey),
     [activeServiceKey]
@@ -4436,6 +4476,7 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaMusic />,
     onDismount() {
+      publishPlaybackActivity(false, "Stopped", "", "", "");
       localAudioPlayer.destroy();
       routerHook.removeRoute(FULLSCREEN_ROUTE);
       routerHook.removeRoute(SPOTIFY_BIG_PICTURE_ROUTE);
