@@ -44,6 +44,8 @@ Turn your TV or monitor into a dynamic visual experience. Choose from multiple a
 *   **D-pad Up / Down:** Rotate 3D particle effects.
 Do you want to see the forecast in your Now Playing fullscreen visualizer? **[Be sure to download the Playhub app](https://github.com/LoZazaMastro/Playhub)** and install Weather from the Playhub Plugin Store.
 
+Do you want to see the forecast in your Now Playing fullscreen visualizer? **[Be sure to download the Playhub app](https://github.com/LoZazaMastro/Playhub)** and install Weather from the Playhub Plugin Store.
+
 ### Per-Source Volume Control & Smart Switching
 Adjust your music volume independently without changing your main Windows master volume or your game audio. Now Playing remembers custom volume levels for every single service. When you change your music source, the plugin automatically launches the new player and cleanly closes the previous one to save system resources and prevent audio overlap.
 
