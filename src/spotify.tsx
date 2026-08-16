@@ -434,6 +434,7 @@ export function SpotifyPlusSettingsPanel({
     clientId: "",
     redirectUri: "http://127.0.0.1:43821/callback",
     authenticated: false,
+    playbackAuthenticated: false,
     compactSavedTracks: true,
     audioQuality: 320,
   });
@@ -522,7 +523,7 @@ export function SpotifyPlusSettingsPanel({
         const status = await python.getSpotifyAuthStatus();
         setAuthState(status.state);
         setStatusText(localizeRuntimeMessage(status.message ?? ""));
-        if (status.authenticated || status.state === "error") {
+        if (status.state === "authenticated" || status.state === "error") {
           if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = 0;
           applySettings(status);
@@ -593,6 +594,20 @@ export function SpotifyPlusSettingsPanel({
         applySettings(next);
       }
       const result = await python.beginSpotifyAuth();
+      if (!result.ok) throw new Error(result.error || t.unableStartAuthorization);
+      setAuthState("waiting");
+      setStatusText(t.completeSignIn);
+      beginPolling();
+    } catch (error: any) {
+      setBusy(false);
+      showError(error?.message ?? String(error));
+    }
+  }
+
+  async function connectPlayback() {
+    try {
+      setBusy(true);
+      const result = await python.beginSpotifyPlaybackAuth();
       if (!result.ok) throw new Error(result.error || t.unableStartAuthorization);
       setAuthState("waiting");
       setStatusText(t.completeSignIn);
@@ -812,6 +827,16 @@ export function SpotifyPlusSettingsPanel({
           >
             <span style={{ justifyContent: "center", textAlign: "center" }}>{setupDetailsOpen ? t.hideDetails : t.showDetails}</span>
           </DialogButton>
+        ) : null}
+        {settingsReady && settings.authenticated && !settings.playbackAuthenticated ? (
+          <div style={{ marginTop: "10px" }}>
+            <p style={{ margin: "0 2px 8px", fontSize: "0.7em", lineHeight: 1.42, opacity: 0.7 }}>
+              {t.finishPlaybackSetup}
+            </p>
+            <DialogButton className="npSpotifyConnectButton" style={{ ...fullButtonStyle, background: SPOTIFY_GREEN, color: "#fff" }} disabled={busy} onClick={() => void connectPlayback()}>
+              <span style={{ fontWeight: 800 }}><SiSpotify /> {t.connectPlayback}</span>
+            </DialogButton>
+          </div>
         ) : null}
         {settingsReady && (!settings.authenticated || setupDetailsOpen) ? (
           <div style={{ marginTop: "12px" }}>

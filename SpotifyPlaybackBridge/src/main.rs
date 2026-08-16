@@ -3,6 +3,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     path::PathBuf,
     sync::{Arc, RwLock},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -41,6 +42,8 @@ struct Snapshot {
     audio_level: f32,
     shuffle_active: bool,
     repeat_mode: String,
+    surround_mode: String,
+    output_channels: u16,
     error: String,
 }
 
@@ -62,6 +65,8 @@ impl Default for Snapshot {
             media_type: String::new(),
             shuffle_active: false,
             repeat_mode: "Off".into(),
+            surround_mode: "off".into(),
+            output_channels: 2,
             error: String::new(),
         }
     }
@@ -71,6 +76,101 @@ struct MeteredSink {
     inner: Box<dyn Sink>,
     state: Arc<RwLock<Snapshot>>,
     last_sample: Instant,
+}
+
+struct SurroundRodioSink {
+    sink: rodio::Sink,
+    _stream: rodio::OutputStream,
+    channels: u16,
+    config: Arc<RwLock<SurroundConfig>>,
+    lfe_state: f32,
+}
+
+#[derive(Clone)]
+struct SurroundConfig {
+    mode: String,
+    gains: [f32; 8],
+}
+
+impl SurroundRodioSink {
+    fn new(config: Arc<RwLock<SurroundConfig>>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut stream = rodio::OutputStreamBuilder::from_default_device()?.open_stream_or_fallback()?;
+        stream.log_on_drop(false);
+        let channels = stream.config().channel_count();
+        if channels < 6 {
+            return Err("default output does not expose surround channels".into());
+        }
+        let sink = rodio::Sink::connect_new(stream.mixer());
+        Ok(Self { sink, _stream: stream, channels, config, lfe_state: 0.0 })
+    }
+}
+
+impl Sink for SurroundRodioSink {
+    fn start(&mut self) -> SinkResult<()> {
+        self.sink.play();
+        Ok(())
+    }
+
+    fn stop(&mut self) -> SinkResult<()> {
+        self.sink.sleep_until_end();
+        self.sink.pause();
+        Ok(())
+    }
+
+    fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
+        let samples = packet.samples().map_err(|error| {
+            librespot::playback::audio_backend::SinkError::OnWrite(error.to_string())
+        })?;
+        let stereo = converter.f64_to_f32(samples);
+        let channels = self.channels as usize;
+        let config = self.config.read().unwrap().clone();
+        let mut output = Vec::with_capacity(stereo.len() / 2 * channels);
+        // One-pole 120 Hz low-pass at Spotify's native 44.1 kHz sample rate.
+        // LFE stays deliberately restrained; overall headroom prevents clipping.
+        const LFE_ALPHA: f32 = 0.01681;
+        const HEADROOM: f32 = 0.70;
+        for frame in stereo.chunks_exact(2) {
+            let left = frame[0];
+            let right = frame[1];
+            if config.mode == "off" {
+                // Keep perceived loudness consistent when switching surround modes.
+                // Speaker trims remain exclusive to upmix, but the shared headroom
+                // avoids a large level jump when returning to direct stereo.
+                output.push((left * HEADROOM).clamp(-1.0, 1.0));
+                output.push((right * HEADROOM).clamp(-1.0, 1.0));
+                output.extend(std::iter::repeat_n(0.0, channels.saturating_sub(2)));
+                continue;
+            }
+            let mono = (left + right) * 0.5;
+            self.lfe_state += LFE_ALPHA * (mono - self.lfe_state);
+            let side_left = (left - right) * 0.48;
+            let side_right = (right - left) * 0.48;
+            let mut mixed = [0.0f32; 8];
+            mixed[0] = left;
+            mixed[1] = right;
+            mixed[2] = mono * 0.72;
+            mixed[3] = self.lfe_state * 0.30;
+            if channels >= 8 {
+                mixed[6] = side_left;
+                mixed[7] = side_right;
+                if config.mode == "7.1" {
+                    mixed[4] = side_left * 0.72;
+                    mixed[5] = side_right * 0.72;
+                }
+            } else {
+                mixed[4] = side_left;
+                mixed[5] = side_right;
+            }
+            for channel in 0..channels {
+                output.push((mixed[channel.min(7)] * config.gains[channel.min(7)] * HEADROOM).clamp(-1.0, 1.0));
+            }
+        }
+        self.sink.append(rodio::buffer::SamplesBuffer::new(self.channels, 44_100, output));
+        while self.sink.len() > 26 {
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
 }
 
 impl MeteredSink {
@@ -144,11 +244,19 @@ struct LoadTracksBody {
     start_index: usize,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SurroundBody {
+    mode: String,
+    speaker_volumes: Vec<u8>,
+}
+
 fn handle_request(
     mut request: Request,
     secret: &str,
     state: &Arc<RwLock<Snapshot>>,
     spirc: &Arc<Spirc>,
+    surround: &Arc<RwLock<SurroundConfig>>,
 ) -> bool {
     if !authorized(&request, secret) {
         let _ = request.respond(json_response(
@@ -171,6 +279,32 @@ fn handle_request(
         let ok = spirc.shutdown().is_ok();
         let _ = request.respond(json_response(serde_json::json!({"ok": ok}), 200));
         return false;
+    }
+    if request.method() == &Method::Post && path == "/action/surround" {
+        let mut body = String::new();
+        let payload = request
+            .as_reader()
+            .read_to_string(&mut body)
+            .ok()
+            .and_then(|_| serde_json::from_str::<SurroundBody>(&body).ok());
+        let Some(payload) = payload else {
+            let _ = request.respond(json_response(serde_json::json!({"ok": false, "error": "invalid-body"}), 400));
+            return true;
+        };
+        let mode = match payload.mode.as_str() {
+            "5.1" | "7.1" => payload.mode,
+            _ => "off".into(),
+        };
+        let mut gains = [1.0f32; 8];
+        for (index, value) in payload.speaker_volumes.iter().take(8).enumerate() {
+            gains[index] = (*value as f32 / 100.0).clamp(0.0, 1.0);
+        }
+        *surround.write().unwrap() = SurroundConfig { mode: mode.clone(), gains };
+        let mut snapshot = state.write().unwrap();
+        snapshot.surround_mode = if snapshot.output_channels >= 6 { mode } else { "off".into() };
+        drop(snapshot);
+        let _ = request.respond(json_response(serde_json::json!({"ok": true}), 200));
+        return true;
     }
 
     let current = state.read().unwrap().clone();
@@ -252,18 +386,31 @@ fn handle_request(
                 Err(librespot::core::Error::invalid_argument("uri"))
             } else {
                 spirc.activate().and_then(|_| {
-                    spirc.load(LoadRequest::from_context_uri(
-                        if context_uri.is_empty() { uri.clone() } else { context_uri },
-                        LoadRequestOptions {
-                            start_playing: true,
-                            playing_track: if offset_uri.is_empty() {
-                                None
-                            } else {
-                                Some(PlayingTrack::Uri(offset_uri))
+                    if context_uri.is_empty()
+                        && (uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:"))
+                    {
+                        spirc.load(LoadRequest::from_tracks(
+                            vec![uri],
+                            LoadRequestOptions {
+                                start_playing: true,
+                                playing_track: Some(PlayingTrack::Index(0)),
+                                ..Default::default()
                             },
-                            ..Default::default()
-                        },
-                    ))
+                        ))
+                    } else {
+                        spirc.load(LoadRequest::from_context_uri(
+                            if context_uri.is_empty() { uri.clone() } else { context_uri },
+                            LoadRequestOptions {
+                                start_playing: true,
+                                playing_track: if offset_uri.is_empty() {
+                                    None
+                                } else {
+                                    Some(PlayingTrack::Uri(offset_uri))
+                                },
+                                ..Default::default()
+                            },
+                        ))
+                    }
                 })
             }
         }
@@ -436,6 +583,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .get("accessToken")
         .and_then(|value| value.as_str())
         .unwrap_or("");
+    let surround_mode = startup.get("surroundMode").and_then(|value| value.as_str()).unwrap_or("off").to_owned();
+    let mut speaker_gains = [1.0f32; 8];
+    if let Some(values) = startup.get("speakerVolumes").and_then(|value| value.as_array()) {
+        for (index, value) in values.iter().take(8).enumerate() {
+            speaker_gains[index] = (value.as_f64().unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+        }
+    }
+    let surround_config = Arc::new(RwLock::new(SurroundConfig {
+        mode: surround_mode,
+        gains: speaker_gains,
+    }));
     let secret = startup
         .get("secret")
         .and_then(|value| value.as_str())
@@ -486,6 +644,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mixer = mixer_builder(MixerConfig::default())?;
     let soft_volume = mixer.get_soft_volume();
     let meter_state = state.clone();
+    let sink_surround_config = surround_config.clone();
     let player = Player::new(
         PlayerConfig {
             bitrate: match audio_quality {
@@ -498,7 +657,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
         session.clone(),
         soft_volume,
-        move || Box::new(MeteredSink::new(backend(None, AudioFormat::default()), meter_state)),
+        move || {
+            let configured_mode = sink_surround_config.read().unwrap().mode.clone();
+            let (output, active_surround_mode, output_channels): (Box<dyn Sink>, String, u16) = match SurroundRodioSink::new(sink_surround_config.clone()) {
+                Ok(sink) => {
+                    let channels = sink.channels;
+                    (Box::new(sink), configured_mode, channels)
+                }
+                Err(_) => (backend(None, AudioFormat::default()), "off".into(), 2),
+            };
+            if let Ok(mut snapshot) = meter_state.write() {
+                snapshot.surround_mode = active_surround_mode;
+                snapshot.output_channels = output_channels;
+            }
+            Box::new(MeteredSink::new(output, meter_state))
+        },
     );
     let events = player.get_player_event_channel();
     let config = ConnectConfig {
@@ -538,7 +711,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_spirc = spirc.clone();
     tokio::task::spawn_blocking(move || {
         for request in server.incoming_requests() {
-            if !handle_request(request, &secret, &server_state, &server_spirc) {
+            if !handle_request(request, &secret, &server_state, &server_spirc, &surround_config) {
                 break;
             }
         }

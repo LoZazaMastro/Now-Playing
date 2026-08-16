@@ -369,6 +369,15 @@ function setSpotifyClientId(clientId) {
 function beginSpotifyAuth() {
     return call("begin_spotify_auth");
 }
+function beginSpotifyPlaybackAuth() {
+    return call("begin_spotify_playback_auth");
+}
+function getSurroundSettings() {
+    return call("get_surround_settings");
+}
+function setSurroundSettings(mode, speakerVolumes) {
+    return call("set_surround_settings", mode, speakerVolumes);
+}
 function getSpotifyAuthStatus() {
     return call("get_spotify_auth_status");
 }
@@ -604,7 +613,7 @@ var en = {
 		fsLegendRotate: "Rotate the 3D effect",
 		settingsParticleResolution: "3D particle resolution",
 		surroundUpmix: "Surround upmix",
-		surroundUpmixHint: "Expands stereo audio into surround. Works only with the Your Music and YouTube Music sources.",
+		surroundUpmixHint: "Expands stereo audio into surround. Works with Your Music, Spotify and YouTube Music.",
 		speakerVolumesShow: "Show speaker volumes",
 		speakerVolumesHide: "Hide speaker volumes"
 	},
@@ -636,6 +645,8 @@ var en = {
 		compactSavedTracksCard: "To reduce Spotify API usage, saved tracks are shown as Play and Shuffle actions by default instead of loading the entire list.",
 		compactSavedTracksDescription: "Enabled by default. Saved tracks show Play and Shuffle without loading the full list, reducing Spotify API requests.",
 		completeSignIn: "Complete the sign-in in your browser, then return to Steam.",
+		finishPlaybackSetup: "One final authorization enables playback directly through Playhub and is saved for future startups.",
+		connectPlayback: "Enable Spotify playback",
 		connect: "Connect Spotify",
 		connected: "Connected",
 		connectedAs: "Connected as {name}",
@@ -1055,7 +1066,7 @@ var it = {
 		fsLegendRotate: "Ruota l'effetto 3D",
 		settingsParticleResolution: "Risoluzione particellari 3D",
 		surroundUpmix: "Upmix surround",
-		surroundUpmixHint: "Espande l'audio stereo e lo trasforma in surround. Funziona solo con le sorgenti La tua musica e YouTube Music.",
+		surroundUpmixHint: "Espande l'audio stereo in surround. Funziona con La tua musica, Spotify e YouTube Music.",
 		speakerVolumesShow: "Mostra volumi casse",
 		speakerVolumesHide: "Nascondi volumi casse"
 	},
@@ -1089,6 +1100,8 @@ var it = {
 		compactSavedTracksCard: "Per limitare l’utilizzo dell’API Spotify, i brani salvati mostrano per impostazione predefinita solo le azioni Riproduci e Casuale invece dell’elenco completo.",
 		compactSavedTracksDescription: "Attiva per impostazione predefinita. I brani salvati mostrano Riproduci e Casuale senza caricare l’elenco completo, riducendo le richieste all’API Spotify.",
 		completeSignIn: "Completa l'accesso nel browser, poi torna a Steam.",
+		finishPlaybackSetup: "Un'ultima autorizzazione abilita la riproduzione diretta tramite Playhub e viene salvata per gli avvii successivi.",
+		connectPlayback: "Abilita riproduzione Spotify",
 		connect: "Collega Spotify",
 		connected: "Collegato",
 		connectedAs: "Collegato come {name}",
@@ -1506,7 +1519,7 @@ var es = {
 		fsLegendRotate: "Girar el efecto 3D",
 		settingsParticleResolution: "Resolución de partículas 3D",
 		surroundUpmix: "Upmix envolvente",
-		surroundUpmixHint: "Expande el audio estéreo y lo convierte en envolvente. Solo funciona con las fuentes Mi música y YouTube Music.",
+		surroundUpmixHint: "Expande el audio estéreo a sonido envolvente. Funciona con Mi música, Spotify y YouTube Music.",
 		speakerVolumesShow: "Mostrar volúmenes de altavoces",
 		speakerVolumesHide: "Ocultar volúmenes de altavoces"
 	},
@@ -1540,6 +1553,8 @@ var es = {
 		compactSavedTracksCard: "Para reducir el uso de la API de Spotify, las canciones guardadas muestran de forma predeterminada solo las acciones Reproducir y Aleatorio, en lugar de cargar la lista completa.",
 		compactSavedTracksDescription: "Activada de forma predeterminada. Las canciones guardadas muestran Reproducir y Aleatorio sin cargar la lista completa, lo que reduce las solicitudes a la API de Spotify.",
 		completeSignIn: "Completa el inicio de sesión en el navegador y vuelve a Steam.",
+		finishPlaybackSetup: "Una última autorización activa la reproducción directa mediante Playhub y se guarda para futuros inicios.",
+		connectPlayback: "Activar reproducción de Spotify",
 		connect: "Conectar Spotify",
 		connected: "Conectado",
 		connectedAs: "Conectado como {name}",
@@ -1957,7 +1972,7 @@ var fr = {
 		fsLegendRotate: "Faire pivoter l'effet 3D",
 		settingsParticleResolution: "Résolution des particules 3D",
 		surroundUpmix: "Upmix surround",
-		surroundUpmixHint: "Étend l'audio stéréo en surround. Fonctionne uniquement avec les sources Ma musique et YouTube Music.",
+		surroundUpmixHint: "Étend l'audio stéréo en surround. Fonctionne avec Ma musique, Spotify et YouTube Music.",
 		speakerVolumesShow: "Afficher les volumes des enceintes",
 		speakerVolumesHide: "Masquer les volumes des enceintes"
 	},
@@ -1991,6 +2006,8 @@ var fr = {
 		compactSavedTracksCard: "Pour réduire l’utilisation de l’API Spotify, les titres enregistrés affichent par défaut uniquement les actions Lire et Lecture aléatoire au lieu de charger la liste complète.",
 		compactSavedTracksDescription: "Activé par défaut. Les titres enregistrés affichent Lire et Lecture aléatoire sans charger la liste complète, ce qui réduit les requêtes à l’API Spotify.",
 		completeSignIn: "Terminez la connexion dans votre navigateur, puis revenez dans Steam.",
+		finishPlaybackSetup: "Une dernière autorisation active la lecture directe via Playhub et reste enregistrée pour les prochains démarrages.",
+		connectPlayback: "Activer la lecture Spotify",
 		connect: "Connecter Spotify",
 		connected: "Connecté",
 		connectedAs: "Connecté en tant que {name}",
@@ -2408,7 +2425,7 @@ var de = {
 		fsLegendRotate: "3D-Effekt drehen",
 		settingsParticleResolution: "Auflösung der 3D-Partikel",
 		surroundUpmix: "Surround-Upmix",
-		surroundUpmixHint: "Erweitert Stereo-Audio zu Surround. Funktioniert nur mit den Quellen Meine Musik und YouTube Music.",
+		surroundUpmixHint: "Erweitert Stereo-Audio zu Surround. Funktioniert mit Meine Musik, Spotify und YouTube Music.",
 		speakerVolumesShow: "Lautsprecher-Lautstärken anzeigen",
 		speakerVolumesHide: "Lautsprecher-Lautstärken ausblenden"
 	},
@@ -2442,6 +2459,8 @@ var de = {
 		compactSavedTracksCard: "Um Spotify-API-Anfragen zu reduzieren, werden für gespeicherte Titel standardmäßig nur Abspielen und Zufallswiedergabe angezeigt, statt die vollständige Liste zu laden.",
 		compactSavedTracksDescription: "Standardmäßig aktiviert. Gespeicherte Titel zeigen Abspielen und Zufallswiedergabe, ohne die vollständige Liste zu laden. Dadurch werden Spotify-API-Anfragen reduziert.",
 		completeSignIn: "Schließe die Anmeldung im Browser ab und kehre dann zu Steam zurück.",
+		finishPlaybackSetup: "Eine letzte Autorisierung aktiviert die direkte Wiedergabe über Playhub und wird für künftige Starts gespeichert.",
+		connectPlayback: "Spotify-Wiedergabe aktivieren",
 		connect: "Spotify verbinden",
 		connected: "Verbunden",
 		connectedAs: "Verbunden als {name}",
@@ -2859,7 +2878,7 @@ var ru = {
 		fsLegendRotate: "Вращать 3D-эффект",
 		settingsParticleResolution: "Разрешение 3D-частиц",
 		surroundUpmix: "Апмикс в surround",
-		surroundUpmixHint: "Расширяет стереозвук в surround. Работает только с источниками «Моя музыка» и YouTube Music.",
+		surroundUpmixHint: "Расширяет стереозвук до объёмного. Работает с источниками «Моя музыка», Spotify и YouTube Music.",
 		speakerVolumesShow: "Показать громкость колонок",
 		speakerVolumesHide: "Скрыть громкость колонок"
 	},
@@ -2893,6 +2912,8 @@ var ru = {
 		compactSavedTracksCard: "Чтобы сократить число запросов к API Spotify, для сохранённых треков по умолчанию отображаются только действия «Воспроизвести» и «Перемешать», без загрузки полного списка.",
 		compactSavedTracksDescription: "Включено по умолчанию. Для сохранённых треков показываются действия «Воспроизвести» и «Перемешать» без загрузки полного списка, что уменьшает число запросов к API Spotify.",
 		completeSignIn: "Завершите вход в браузере, затем вернитесь в Steam.",
+		finishPlaybackSetup: "Последняя авторизация включает прямое воспроизведение через Playhub и сохраняется для следующих запусков.",
+		connectPlayback: "Включить воспроизведение Spotify",
 		connect: "Подключить Spotify",
 		connected: "Подключено",
 		connectedAs: "Подключено как {name}",
@@ -3310,7 +3331,7 @@ var ja = {
 		fsLegendRotate: "3Dエフェクトを回転",
 		settingsParticleResolution: "3D パーティクルの解像度",
 		surroundUpmix: "サラウンドアップミックス",
-		surroundUpmixHint: "ステレオ音声をサラウンドに拡張します。マイミュージックとYouTube Musicのソースでのみ動作します。",
+		surroundUpmixHint: "ステレオ音声をサラウンドに拡張します。マイミュージック、Spotify、YouTube Musicで動作します。",
 		speakerVolumesShow: "スピーカー音量を表示",
 		speakerVolumesHide: "スピーカー音量を隠す"
 	},
@@ -3344,6 +3365,8 @@ var ja = {
 		compactSavedTracksCard: "Spotify APIの使用量を抑えるため、保存済み曲は一覧全体を読み込まず、初期状態では「再生」と「シャッフル」だけを表示します。",
 		compactSavedTracksDescription: "初期状態で有効です。保存済み曲の一覧全体を読み込まずに「再生」と「シャッフル」を表示し、Spotify APIへのリクエストを減らします。",
 		completeSignIn: "ブラウザーでサインインを完了してからSteamに戻ってください。",
+		finishPlaybackSetup: "最後の認証でPlayhubからの直接再生が有効になり、次回以降の起動用に保存されます。",
+		connectPlayback: "Spotify再生を有効にする",
 		connect: "Spotifyに接続",
 		connected: "接続済み",
 		connectedAs: "{name} として接続中",
@@ -3761,7 +3784,7 @@ var ko = {
 		fsLegendRotate: "3D 효과 회전",
 		settingsParticleResolution: "3D 파티클 해상도",
 		surroundUpmix: "서라운드 업믹스",
-		surroundUpmixHint: "스테레오 오디오를 서라운드로 확장합니다. 내 음악과 YouTube Music 소스에서만 작동합니다.",
+		surroundUpmixHint: "스테레오 오디오를 서라운드로 확장합니다. 내 음악, Spotify 및 YouTube Music에서 작동합니다.",
 		speakerVolumesShow: "스피커 볼륨 표시",
 		speakerVolumesHide: "스피커 볼륨 숨기기"
 	},
@@ -3795,6 +3818,8 @@ var ko = {
 		compactSavedTracksCard: "Spotify API 사용량을 줄이기 위해 저장한 곡은 전체 목록을 불러오는 대신 기본적으로 재생 및 셔플 작업만 표시합니다.",
 		compactSavedTracksDescription: "기본적으로 켜져 있습니다. 저장한 곡의 전체 목록을 불러오지 않고 재생과 셔플을 표시해 Spotify API 요청을 줄입니다.",
 		completeSignIn: "브라우저에서 로그인을 완료한 뒤 Steam으로 돌아오세요.",
+		finishPlaybackSetup: "마지막 인증을 완료하면 Playhub에서 직접 재생할 수 있으며 다음 시작을 위해 저장됩니다.",
+		connectPlayback: "Spotify 재생 활성화",
 		connect: "Spotify 연결",
 		connected: "연결됨",
 		connectedAs: "{name}(으)로 연결됨",
@@ -4212,7 +4237,7 @@ var zh = {
 		fsLegendRotate: "旋转3D效果",
 		settingsParticleResolution: "3D 粒子分辨率",
 		surroundUpmix: "环绕声上混",
-		surroundUpmixHint: "将立体声音频扩展为环绕声。仅适用于我的音乐和 YouTube Music 音源。",
+		surroundUpmixHint: "将立体声音频扩展为环绕声。适用于我的音乐、Spotify 和 YouTube Music。",
 		speakerVolumesShow: "显示扬声器音量",
 		speakerVolumesHide: "隐藏扬声器音量"
 	},
@@ -4246,6 +4271,8 @@ var zh = {
 		compactSavedTracksCard: "为减少 Spotify API 的使用量，已保存曲目默认只显示“播放”和“随机播放”操作，而不会加载完整列表。",
 		compactSavedTracksDescription: "默认启用。已保存曲目无需加载完整列表即可显示“播放”和“随机播放”，从而减少对 Spotify API 的请求。",
 		completeSignIn: "请在浏览器中完成登录，然后返回 Steam。",
+		finishPlaybackSetup: "最后一次授权将启用通过 Playhub 直接播放，并为以后启动保存。",
+		connectPlayback: "启用 Spotify 播放",
 		connect: "连接 Spotify",
 		connected: "已连接",
 		connectedAs: "已作为 {name} 连接",
@@ -4669,7 +4696,7 @@ var catalogs = {
 		fsLegendRotate: "Girar o efeito 3D",
 		settingsParticleResolution: "Resolução das partículas 3D",
 		surroundUpmix: "Upmix surround",
-		surroundUpmixHint: "Expande o áudio estéreo em surround. Funciona apenas com as fontes Minha música e YouTube Music.",
+		surroundUpmixHint: "Expande o áudio estéreo em surround. Funciona com Minha música, Spotify e YouTube Music.",
 		speakerVolumesShow: "Mostrar volumes das caixas",
 		speakerVolumesHide: "Ocultar volumes das caixas"
 	},
@@ -4703,6 +4730,8 @@ var catalogs = {
 		compactSavedTracksCard: "Para reduzir o uso da API do Spotify, as faixas salvas mostram por padrão apenas as ações Reproduzir e Aleatório em vez de carregar a lista completa.",
 		compactSavedTracksDescription: "Ativada por padrão. As faixas salvas mostram Reproduzir e Aleatório sem carregar a lista completa, reduzindo as solicitações à API do Spotify.",
 		completeSignIn: "Conclua o login no navegador e volte ao Steam.",
+		finishPlaybackSetup: "Uma última autorização ativa a reprodução direta pelo Playhub e fica guardada para os próximos arranques.",
+		connectPlayback: "Ativar reprodução do Spotify",
 		connect: "Conectar Spotify",
 		connected: "Conectado",
 		connectedAs: "Conectado como {name}",
@@ -5216,6 +5245,7 @@ class LocalAudioEngine {
         this.frequencyData = null;
         this.lastContextResumeAt = 0;
         this.prefetchedVideoIds = new Set();
+        this.failedYouTubeMusicIds = new Set();
         this.surroundMode = (() => {
             try {
                 const stored = String(window.localStorage.getItem("nowPlaying.surroundMode") || "");
@@ -5373,10 +5403,21 @@ class LocalAudioEngine {
             const splitter = context.createChannelSplitter(2);
             const merger = context.createChannelMerger(channels);
             analyser.connect(splitter);
-            const route = (input, output, base) => {
+            const route = (input, output, base, lowPass = false) => {
                 const gain = context.createGain();
                 gain.gain.value = base * (Math.max(0, Math.min(100, this.speakerVolumes[output] ?? 100)) / 100);
-                splitter.connect(gain, input, 0);
+                if (lowPass) {
+                    const filter = context.createBiquadFilter();
+                    filter.type = "lowpass";
+                    filter.frequency.value = 120;
+                    filter.Q.value = 0.707;
+                    splitter.connect(filter, input, 0);
+                    filter.connect(gain);
+                    this.upmixNodes.push(filter);
+                }
+                else {
+                    splitter.connect(gain, input, 0);
+                }
                 gain.connect(merger, 0, output);
                 this.upmixNodes.push(gain);
                 this.channelContribs.push({ node: gain, base, channel: output });
@@ -5385,8 +5426,8 @@ class LocalAudioEngine {
             route(1, 1, 1); // Front Right = R
             route(0, 2, 0.5);
             route(1, 2, 0.5); // Center = (L+R)/2
-            route(0, 3, 0.35);
-            route(1, 3, 0.35); // LFE   = (L+R) attenuated
+            route(0, 3, 0.15, true);
+            route(1, 3, 0.15, true); // LFE = low-passed mono, restrained
             if (channels >= 6) {
                 route(0, 4, 0.9);
                 route(1, 5, 0.9);
@@ -5604,6 +5645,7 @@ class LocalAudioEngine {
             throw new Error(getTranslations("runtime").noPlayableLocalTracks);
         const requestedIndex = Math.max(0, Math.min(Math.floor(startIndex || 0), sourceQueue.length - 1));
         this.originalQueue = [...sourceQueue];
+        this.failedYouTubeMusicIds.clear();
         const queue = this.state.shuffleActive
             ? [sourceQueue[requestedIndex], ...this.shuffleEntries(sourceQueue.filter((_, index) => index !== requestedIndex))]
             : sourceQueue;
@@ -5641,7 +5683,20 @@ class LocalAudioEngine {
         // until the real `playing` event fires with the new audio.
         audio.pause();
         this.patch({ track, position: 0, length: Number(track?.duration_ms || 0), status: autoPlay ? "Paused" : "Stopped", error: "" });
-        const streamUrl = await this.streamUrl(track);
+        let streamUrl = "";
+        try {
+            streamUrl = await this.streamUrl(track);
+            if (String(track?.sourceKey ?? "") === "youtubeMusic") {
+                this.failedYouTubeMusicIds.delete(String(track?.videoId ?? track?.id ?? ""));
+            }
+        }
+        catch (error) {
+            if (await this.skipUnavailableYouTubeMusicTrack(track, error, autoPlay))
+                return;
+            const message = String(error?.message ?? error ?? getTranslations("runtime").localPlaybackStartFailed);
+            this.patch({ status: "Stopped", error: message });
+            throw error;
+        }
         if (token !== this.loadingToken)
             return;
         audio.src = `${streamUrl}?v=${encodeURIComponent(String(track?.modifiedAt ?? track?.id ?? Date.now()))}`;
@@ -5653,11 +5708,36 @@ class LocalAudioEngine {
             catch (error) {
                 if (token !== this.loadingToken)
                     return;
+                if (await this.skipUnavailableYouTubeMusicTrack(track, error, autoPlay))
+                    return;
                 const message = String(error?.message ?? error ?? getTranslations("runtime").localPlaybackStartFailed);
                 this.patch({ status: "Stopped", error: message });
                 throw error;
             }
         }
+    }
+    async skipUnavailableYouTubeMusicTrack(track, error, autoPlay) {
+        if (!autoPlay || String(track?.sourceKey ?? "") !== "youtubeMusic" || this.state.queue.length < 2)
+            return false;
+        const failedId = String(track?.videoId ?? track?.id ?? "");
+        if (failedId)
+            this.failedYouTubeMusicIds.add(failedId);
+        void reportDiagnosticEvent("youtubeMusic", "unplayable_track_skipped", {
+            videoId: failedId,
+            title: String(track?.name ?? track?.title ?? ""),
+            error: String(error?.message ?? error ?? "stream unavailable"),
+        }).catch(() => { });
+        for (let step = 1; step < this.state.queue.length; step += 1) {
+            const nextIndex = (this.state.index + step) % this.state.queue.length;
+            const candidate = this.state.queue[nextIndex];
+            const candidateId = String(candidate?.videoId ?? candidate?.id ?? "");
+            if (!candidateId || this.failedYouTubeMusicIds.has(candidateId))
+                continue;
+            this.patch({ index: nextIndex, error: "" });
+            await this.loadCurrent(true);
+            return true;
+        }
+        return false;
     }
     async playPause() {
         const audio = this.ensureAudio();
@@ -5793,6 +5873,7 @@ class LocalAudioEngine {
         this.analyser = null;
         this.frequencyData = null;
         this.originalQueue = [];
+        this.failedYouTubeMusicIds.clear();
         this.recoveryAttempts = 0;
         this.recoveryInFlight = false;
         this.clearStallRecoveryTimer();
@@ -6432,6 +6513,7 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
         clientId: "",
         redirectUri: "http://127.0.0.1:43821/callback",
         authenticated: false,
+        playbackAuthenticated: false,
         compactSavedTracks: true,
         audioQuality: 320,
     });
@@ -6523,7 +6605,7 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
                 const status = await getSpotifyAuthStatus();
                 setAuthState(status.state);
                 setStatusText(localizeRuntimeMessage(status.message ?? ""));
-                if (status.authenticated || status.state === "error") {
+                if (status.state === "authenticated" || status.state === "error") {
                     if (pollRef.current)
                         window.clearInterval(pollRef.current);
                     pollRef.current = 0;
@@ -6600,6 +6682,21 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
                 applySettings(next);
             }
             const result = await beginSpotifyAuth();
+            if (!result.ok)
+                throw new Error(result.error || t.unableStartAuthorization);
+            setAuthState("waiting");
+            setStatusText(t.completeSignIn);
+            beginPolling();
+        }
+        catch (error) {
+            setBusy(false);
+            showError$1(error?.message ?? String(error));
+        }
+    }
+    async function connectPlayback() {
+        try {
+            setBusy(true);
+            const result = await beginSpotifyPlaybackAuth();
             if (!result.ok)
                 throw new Error(result.error || t.unableStartAuthorization);
             setAuthState("waiting");
@@ -6783,7 +6880,7 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
           .npSpotifySettingsCard button:hover,.npSpotifySettingsCard button:focus,.npSpotifySettingsCard button.gpfocus{color:#fff!important;background:rgba(255,255,255,.12)!important;border-color:rgba(255,255,255,.24)!important;box-shadow:0 0 0 1px rgba(29,185,84,.28),0 0 18px rgba(29,185,84,.15)!important}
           .npSpotifySettingsCard .npSpotifyConnectButton{color:#fff!important;background:rgba(29,185,84,.72)!important}
           .npSpotifySettingsCard .npSpotifyConnectButton:hover,.npSpotifySettingsCard .npSpotifyConnectButton:focus,.npSpotifySettingsCard .npSpotifyConnectButton.gpfocus{background:#27d260!important;color:#fff!important;border-color:rgba(255,255,255,.34)!important;box-shadow:0 0 0 2px rgba(255,255,255,.62),0 0 22px rgba(29,185,84,.34)!important}
-        ` }), SP_JSX.jsx(SpotifyLogoTitle, { subtitle: t.personalMode }), SP_JSX.jsx("p", { style: { fontSize: "0.74em", lineHeight: 1.42, opacity: 0.74, margin: "10px 0" }, children: t.settingsDescription }), selectedService !== "spotify" ? (SP_JSX.jsx("div", { style: { fontSize: "0.72em", opacity: 0.64, marginBottom: "9px" }, children: t.selectSpotifyHint })) : null, settingsReady && settings.authenticated ? (SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButtonStyle, marginTop: "12px" }, onClick: () => setSetupDetailsOpen((open) => !open), children: SP_JSX.jsx("span", { style: { justifyContent: "center", textAlign: "center" }, children: setupDetailsOpen ? t.hideDetails : t.showDetails }) })) : null, settingsReady && (!settings.authenticated || setupDetailsOpen) ? (SP_JSX.jsxs("div", { style: { marginTop: "12px" }, children: [SP_JSX.jsx("div", { style: { fontSize: "0.72em", fontWeight: 800, marginBottom: "8px" }, children: t.setupGuide }), SP_JSX.jsx("ol", { style: { margin: 0, padding: "0 0 0 20px", fontSize: "0.71em", lineHeight: 1.45 }, children: t.setupSteps.map((step, index) => (SP_JSX.jsxs("li", { style: { marginBottom: "10px", opacity: 0.82 }, children: [SP_JSX.jsx("span", { children: step }), index === 0 ? (SP_JSX.jsx("div", { style: { marginTop: "7px" }, children: SP_JSX.jsx(DFL.DialogButton, { style: fullButtonStyle, onClick: () => void openSpotifyDashboard(), children: SP_JSX.jsxs("span", { children: [SP_JSX.jsx(FaExternalLinkAlt, {}), " ", t.openDashboard] }) }) })) : null, index === 2 ? setupValueField(t.appNameLabel, t.appNameValue, t.copyAppName, t.appNameCopied) : null, index === 3 ? setupValueField(t.appDescriptionLabel, t.appDescriptionValue, t.copyAppDescription, t.appDescriptionCopied, true) : null, index === 4 ? (SP_JSX.jsx("div", { style: { marginTop: "6px", padding: "7px 8px", borderRadius: "7px", background: "rgba(255,255,255,0.045)", fontSize: "0.96em", opacity: 0.78 }, children: t.websiteOptional })) : null, index === 5 ? setupValueField(t.redirectUri, settings.redirectUri, t.copyRedirectUri, t.redirectCopied) : null, index === 6 ? (SP_JSX.jsx("div", { style: { marginTop: "6px", padding: "7px 8px", borderRadius: "7px", background: "rgba(29,185,84,0.10)", border: "1px solid rgba(29,185,84,0.2)", fontSize: "0.96em", fontWeight: 700 }, children: t.webApiOnly })) : null, index === 7 ? (SP_JSX.jsx("div", { style: { marginTop: "6px", padding: "7px 8px", borderRadius: "7px", background: "rgba(255,255,255,0.045)", fontSize: "0.96em", opacity: 0.78 }, children: t.developerTerms })) : null] }, `${index}-${step}`))) }), SP_JSX.jsx("label", { style: { display: "block", fontSize: "0.68em", opacity: 0.58, marginBottom: "4px" }, children: t.clientId }), SP_JSX.jsx("input", { type: "text", value: clientId, spellCheck: false, autoComplete: "off", onChange: (event) => setClientId(event.currentTarget.value), onFocus: (event) => event.currentTarget.select(), style: {
+        ` }), SP_JSX.jsx(SpotifyLogoTitle, { subtitle: t.personalMode }), SP_JSX.jsx("p", { style: { fontSize: "0.74em", lineHeight: 1.42, opacity: 0.74, margin: "10px 0" }, children: t.settingsDescription }), selectedService !== "spotify" ? (SP_JSX.jsx("div", { style: { fontSize: "0.72em", opacity: 0.64, marginBottom: "9px" }, children: t.selectSpotifyHint })) : null, settingsReady && settings.authenticated ? (SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButtonStyle, marginTop: "12px" }, onClick: () => setSetupDetailsOpen((open) => !open), children: SP_JSX.jsx("span", { style: { justifyContent: "center", textAlign: "center" }, children: setupDetailsOpen ? t.hideDetails : t.showDetails }) })) : null, settingsReady && settings.authenticated && !settings.playbackAuthenticated ? (SP_JSX.jsxs("div", { style: { marginTop: "10px" }, children: [SP_JSX.jsx("p", { style: { margin: "0 2px 8px", fontSize: "0.7em", lineHeight: 1.42, opacity: 0.7 }, children: t.finishPlaybackSetup }), SP_JSX.jsx(DFL.DialogButton, { className: "npSpotifyConnectButton", style: { ...fullButtonStyle, background: SPOTIFY_GREEN, color: "#fff" }, disabled: busy, onClick: () => void connectPlayback(), children: SP_JSX.jsxs("span", { style: { fontWeight: 800 }, children: [SP_JSX.jsx(SiSpotify, {}), " ", t.connectPlayback] }) })] })) : null, settingsReady && (!settings.authenticated || setupDetailsOpen) ? (SP_JSX.jsxs("div", { style: { marginTop: "12px" }, children: [SP_JSX.jsx("div", { style: { fontSize: "0.72em", fontWeight: 800, marginBottom: "8px" }, children: t.setupGuide }), SP_JSX.jsx("ol", { style: { margin: 0, padding: "0 0 0 20px", fontSize: "0.71em", lineHeight: 1.45 }, children: t.setupSteps.map((step, index) => (SP_JSX.jsxs("li", { style: { marginBottom: "10px", opacity: 0.82 }, children: [SP_JSX.jsx("span", { children: step }), index === 0 ? (SP_JSX.jsx("div", { style: { marginTop: "7px" }, children: SP_JSX.jsx(DFL.DialogButton, { style: fullButtonStyle, onClick: () => void openSpotifyDashboard(), children: SP_JSX.jsxs("span", { children: [SP_JSX.jsx(FaExternalLinkAlt, {}), " ", t.openDashboard] }) }) })) : null, index === 2 ? setupValueField(t.appNameLabel, t.appNameValue, t.copyAppName, t.appNameCopied) : null, index === 3 ? setupValueField(t.appDescriptionLabel, t.appDescriptionValue, t.copyAppDescription, t.appDescriptionCopied, true) : null, index === 4 ? (SP_JSX.jsx("div", { style: { marginTop: "6px", padding: "7px 8px", borderRadius: "7px", background: "rgba(255,255,255,0.045)", fontSize: "0.96em", opacity: 0.78 }, children: t.websiteOptional })) : null, index === 5 ? setupValueField(t.redirectUri, settings.redirectUri, t.copyRedirectUri, t.redirectCopied) : null, index === 6 ? (SP_JSX.jsx("div", { style: { marginTop: "6px", padding: "7px 8px", borderRadius: "7px", background: "rgba(29,185,84,0.10)", border: "1px solid rgba(29,185,84,0.2)", fontSize: "0.96em", fontWeight: 700 }, children: t.webApiOnly })) : null, index === 7 ? (SP_JSX.jsx("div", { style: { marginTop: "6px", padding: "7px 8px", borderRadius: "7px", background: "rgba(255,255,255,0.045)", fontSize: "0.96em", opacity: 0.78 }, children: t.developerTerms })) : null] }, `${index}-${step}`))) }), SP_JSX.jsx("label", { style: { display: "block", fontSize: "0.68em", opacity: 0.58, marginBottom: "4px" }, children: t.clientId }), SP_JSX.jsx("input", { type: "text", value: clientId, spellCheck: false, autoComplete: "off", onChange: (event) => setClientId(event.currentTarget.value), onFocus: (event) => event.currentTarget.select(), style: {
                                     width: "100%",
                                     boxSizing: "border-box",
                                     padding: "9px 10px",
@@ -9472,15 +9569,43 @@ function SurroundUpmixControls({ accent = "#66c0f4", cardStyle }) {
     const [mode, setMode] = SP_REACT.useState(() => localAudioPlayer.getSurroundMode());
     const [expanded, setExpanded] = SP_REACT.useState(false);
     const [volumes, setVolumes] = SP_REACT.useState(() => localAudioPlayer.getSpeakerVolumes());
+    const backendSyncTimer = SP_REACT.useRef(0);
     const channels = mode === "7.1" ? 8 : mode === "5.1" ? 6 : 0;
+    SP_REACT.useEffect(() => {
+        let active = true;
+        void getSurroundSettings().then((saved) => {
+            if (!active)
+                return;
+            setMode(saved.mode);
+            setVolumes(saved.speakerVolumes);
+            localAudioPlayer.setSurroundMode(saved.mode);
+            saved.speakerVolumes.forEach((value, index) => localAudioPlayer.setSpeakerVolume(index, value));
+        }).catch(() => { });
+        return () => {
+            active = false;
+            if (backendSyncTimer.current)
+                window.clearTimeout(backendSyncTimer.current);
+        };
+    }, []);
+    const syncBackend = (nextMode, nextVolumes) => {
+        if (backendSyncTimer.current)
+            window.clearTimeout(backendSyncTimer.current);
+        backendSyncTimer.current = window.setTimeout(() => void setSurroundSettings(nextMode, nextVolumes), 180);
+    };
     const choose = (target) => {
         const next = mode === target ? "off" : target;
         setMode(next);
         localAudioPlayer.setSurroundMode(next);
+        syncBackend(next, volumes);
     };
     const setVol = (index, value) => {
         const clamped = Math.max(0, Math.min(100, Math.round(value)));
-        setVolumes((prev) => { const next = [...prev]; next[index] = clamped; return next; });
+        setVolumes((prev) => {
+            const next = [...prev];
+            next[index] = clamped;
+            syncBackend(mode, next);
+            return next;
+        });
         localAudioPlayer.setSpeakerVolume(index, clamped);
     };
     const nudge = (index) => (event) => {

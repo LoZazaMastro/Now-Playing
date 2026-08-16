@@ -66,6 +66,7 @@ class LocalAudioEngine {
   private frequencyData: Uint8Array<ArrayBuffer> | null = null;
   private lastContextResumeAt = 0;
   private prefetchedVideoIds = new Set<string>();
+  private failedYouTubeMusicIds = new Set<string>();
 
   constructor() {
     if (typeof window === "undefined") return;
@@ -201,10 +202,20 @@ class LocalAudioEngine {
       const splitter = context.createChannelSplitter(2);
       const merger = context.createChannelMerger(channels);
       analyser.connect(splitter);
-      const route = (input: number, output: number, base: number) => {
+      const route = (input: number, output: number, base: number, lowPass = false) => {
         const gain = context.createGain();
         gain.gain.value = base * (Math.max(0, Math.min(100, this.speakerVolumes[output] ?? 100)) / 100);
-        splitter.connect(gain, input, 0);
+        if (lowPass) {
+          const filter = context.createBiquadFilter();
+          filter.type = "lowpass";
+          filter.frequency.value = 120;
+          filter.Q.value = 0.707;
+          splitter.connect(filter, input, 0);
+          filter.connect(gain);
+          this.upmixNodes.push(filter);
+        } else {
+          splitter.connect(gain, input, 0);
+        }
         gain.connect(merger, 0, output);
         this.upmixNodes.push(gain);
         this.channelContribs.push({ node: gain, base, channel: output });
@@ -212,7 +223,7 @@ class LocalAudioEngine {
       route(0, 0, 1);                       // Front Left  = L
       route(1, 1, 1);                       // Front Right = R
       route(0, 2, 0.5); route(1, 2, 0.5);   // Center = (L+R)/2
-      route(0, 3, 0.35); route(1, 3, 0.35); // LFE   = (L+R) attenuated
+      route(0, 3, 0.15, true); route(1, 3, 0.15, true); // LFE = low-passed mono, restrained
       if (channels >= 6) { route(0, 4, 0.9); route(1, 5, 0.9); }   // Side L/R
       if (channels >= 8) { route(0, 6, 0.75); route(1, 7, 0.75); } // Back L/R
       merger.connect(destination);
@@ -422,6 +433,7 @@ class LocalAudioEngine {
     if (!sourceQueue.length) throw new Error(getTranslations("runtime").noPlayableLocalTracks);
     const requestedIndex = Math.max(0, Math.min(Math.floor(startIndex || 0), sourceQueue.length - 1));
     this.originalQueue = [...sourceQueue];
+    this.failedYouTubeMusicIds.clear();
     const queue = this.state.shuffleActive
       ? [sourceQueue[requestedIndex], ...this.shuffleEntries(sourceQueue.filter((_, index) => index !== requestedIndex))]
       : sourceQueue;
@@ -459,7 +471,18 @@ class LocalAudioEngine {
     // until the real `playing` event fires with the new audio.
     audio.pause();
     this.patch({ track, position: 0, length: Number(track?.duration_ms || 0), status: autoPlay ? "Paused" : "Stopped", error: "" });
-    const streamUrl = await this.streamUrl(track);
+    let streamUrl = "";
+    try {
+      streamUrl = await this.streamUrl(track);
+      if (String(track?.sourceKey ?? "") === "youtubeMusic") {
+        this.failedYouTubeMusicIds.delete(String(track?.videoId ?? track?.id ?? ""));
+      }
+    } catch (error: any) {
+      if (await this.skipUnavailableYouTubeMusicTrack(track, error, autoPlay)) return;
+      const message = String(error?.message ?? error ?? getTranslations("runtime").localPlaybackStartFailed);
+      this.patch({ status: "Stopped", error: message });
+      throw error;
+    }
     if (token !== this.loadingToken) return;
     audio.src = `${streamUrl}?v=${encodeURIComponent(String(track?.modifiedAt ?? track?.id ?? Date.now()))}`;
     audio.load();
@@ -468,11 +491,34 @@ class LocalAudioEngine {
         await audio.play();
       } catch (error: any) {
         if (token !== this.loadingToken) return;
+        if (await this.skipUnavailableYouTubeMusicTrack(track, error, autoPlay)) return;
         const message = String(error?.message ?? error ?? getTranslations("runtime").localPlaybackStartFailed);
         this.patch({ status: "Stopped", error: message });
         throw error;
       }
     }
+  }
+
+  private async skipUnavailableYouTubeMusicTrack(track: any, error: unknown, autoPlay: boolean) {
+    if (!autoPlay || String(track?.sourceKey ?? "") !== "youtubeMusic" || this.state.queue.length < 2) return false;
+    const failedId = String(track?.videoId ?? track?.id ?? "");
+    if (failedId) this.failedYouTubeMusicIds.add(failedId);
+    void python.reportDiagnosticEvent("youtubeMusic", "unplayable_track_skipped", {
+      videoId: failedId,
+      title: String(track?.name ?? track?.title ?? ""),
+      error: String((error as any)?.message ?? error ?? "stream unavailable"),
+    }).catch(() => {});
+
+    for (let step = 1; step < this.state.queue.length; step += 1) {
+      const nextIndex = (this.state.index + step) % this.state.queue.length;
+      const candidate = this.state.queue[nextIndex];
+      const candidateId = String(candidate?.videoId ?? candidate?.id ?? "");
+      if (!candidateId || this.failedYouTubeMusicIds.has(candidateId)) continue;
+      this.patch({ index: nextIndex, error: "" });
+      await this.loadCurrent(true);
+      return true;
+    }
+    return false;
   }
 
   async playPause() {
@@ -598,6 +644,7 @@ class LocalAudioEngine {
     this.analyser = null;
     this.frequencyData = null;
     this.originalQueue = [];
+    this.failedYouTubeMusicIds.clear();
     this.recoveryAttempts = 0;
     this.recoveryInFlight = false;
     this.clearStallRecoveryTimer();

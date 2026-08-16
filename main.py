@@ -775,6 +775,9 @@ class Plugin:
         self.spotify_settings_path = os.path.join(settings_root, "spotify-plus.json")
         self.spotify_redirect_port = 43821
         self.spotify_redirect_uri = f"http://127.0.0.1:{self.spotify_redirect_port}/callback"
+        self.spotify_playback_client_id = "65b708073fc0480ea92a077233ca87bd"
+        self.spotify_playback_redirect_port = 5588
+        self.spotify_playback_redirect_uri = f"http://127.0.0.1:{self.spotify_playback_redirect_port}/login"
         self.spotify_settings = self._load_spotify_settings()
         self._spotify_token_lock = threading.Lock()
         self._spotify_auth_lock = threading.Lock()
@@ -782,6 +785,10 @@ class Plugin:
         self._spotify_auth_thread = None
         self._spotify_auth_state = ""
         self._spotify_code_verifier = ""
+        self._spotify_playback_auth_server = None
+        self._spotify_playback_auth_thread = None
+        self._spotify_playback_auth_state = ""
+        self._spotify_playback_code_verifier = ""
         self._spotify_auth_status: Dict[str, Any] = {"state": "idle", "message": ""}
         self._spotify_api_cache: Dict[str, Tuple[float, Any]] = {}
         self._spotify_cache_lock = threading.Lock()
@@ -3495,14 +3502,14 @@ class Plugin:
                 self._spotify_playback_bridge_error = f"Spotify playback helper staging failed: {exc}"
                 self._spotify_playback_bridge_retry_at = now + 60.0
                 return False
-            granted_scopes = {value.strip().casefold() for value in str(self.spotify_settings.get("scope") or "").split() if value.strip()}
+            granted_scopes = {value.strip().casefold() for value in str(self.spotify_settings.get("playback_scope") or "").split() if value.strip()}
             if "streaming" not in granted_scopes:
-                self._spotify_playback_bridge_error = "Reconnect Spotify to enable playback on this PC"
+                self._spotify_playback_bridge_error = "Complete Spotify playback authorization"
                 self._spotify_playback_bridge_retry_at = now + 300.0
                 return False
-            access_token = self._spotify_access_token(False)
+            access_token = self._spotify_playback_access_token(False)
             if not access_token:
-                self._spotify_playback_bridge_error = "Spotify is not connected"
+                self._spotify_playback_bridge_error = "Spotify playback is not connected"
                 self._spotify_playback_bridge_retry_at = now + 60.0
                 return False
             orphaned = sorted(self._plugin_helper_process_ids(["SpotifyPlaybackBridge.exe"]))
@@ -3541,6 +3548,8 @@ class Plugin:
                 "audioQuality": audio_quality,
                 "audioCachePath": audio_cache_path,
                 "audioCacheSizeBytes": SPOTIFY_AUDIO_CACHE_LIMIT_BYTES,
+                "surroundMode": str(self.spotify_settings.get("surround_mode", "off")),
+                "speakerVolumes": list(self.spotify_settings.get("speaker_volumes") or [100] * 8),
             }) + "\n")
             process.stdin.flush()
             process.stdin.close()
@@ -3593,20 +3602,35 @@ class Plugin:
             return True
 
     def _spotify_playback_bridge_start_with_recovery_sync(self) -> bool:
+        # Respect the start cooldown. Previously every background snapshot
+        # bypassed it and forced another OAuth refresh while the helper was
+        # unavailable, rapidly consuming Spotify requests during PC startup.
+        if time.monotonic() < self._spotify_playback_bridge_retry_at:
+            return False
         if self._spotify_playback_bridge_start_sync():
             return True
         first_error = self._spotify_playback_bridge_error
         # Do not spin on configuration failures that require user action.
-        if "Reconnect Spotify" in first_error or "not connected" in first_error or "missing" in first_error:
+        if "authorization" in first_error or "not connected" in first_error or "missing" in first_error:
             return False
         try:
             self._spotify_playback_bridge_stop_sync()
             self._spotify_playback_bridge_retry_at = 0.0
-            self._spotify_access_token(True)
+            self._spotify_playback_access_token(True)
             time.sleep(0.15)
             recovered = self._spotify_playback_bridge_start_sync()
             if recovered:
                 self._record_diagnostic_event("spotify", "playback_bridge_recovered", {"previousError": first_error})
+            elif "INVALID_CREDENTIALS" in str(self._spotify_playback_bridge_error).upper():
+                # A freshly refreshed token was rejected too. Waiting avoids a
+                # token-refresh loop while still allowing automatic recovery.
+                self._spotify_playback_bridge_retry_at = time.monotonic() + 300.0
+                self._record_diagnostic_event(
+                    "spotify",
+                    "playback_bridge_credentials_rejected",
+                    {"retryAfterSeconds": 300},
+                    "warning",
+                )
             return recovered
         except Exception as exc:
             self._spotify_playback_bridge_error = str(exc or first_error)
@@ -3702,6 +3726,8 @@ class Plugin:
                 "id": "spotify-integrated",
                 "name": "Playhub Now Playing",
                 "volume_percent": clamp_value(payload.get("volume"), 0, 100),
+                "surround_mode": str(payload.get("surroundMode") or "off"),
+                "output_channels": int(payload.get("outputChannels") or 2),
             },
             "item": item,
         }
@@ -3712,6 +3738,19 @@ class Plugin:
                 self._spotify_control_override = {}
                 self._spotify_control_override_until = 0.0
         return result
+
+    def _spotify_wait_for_bridge_playback_sync(self, timeout: float = 2.5) -> bool:
+        """Wait until an accepted librespot load is visible as active playback."""
+        deadline = time.monotonic() + max(0.25, float(timeout))
+        while time.monotonic() < deadline:
+            try:
+                snapshot = self._spotify_playback_bridge_request_sync("/snapshot", 0.55)
+                if snapshot.get("ready") and snapshot.get("active"):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return False
 
     def _spotify_pause_for_source_switch_sync(self) -> bool:
         """Pause Spotify deterministically before another source becomes active."""
@@ -5723,12 +5762,18 @@ class Plugin:
             "refresh_token": "",
             "expires_at": 0.0,
             "scope": "",
+            "playback_access_token": "",
+            "playback_refresh_token": "",
+            "playback_expires_at": 0.0,
+            "playback_scope": "",
             "profile": {},
             "recent_playlists": [],
             "rate_limit_until": 0.0,
             "compact_saved_tracks": True,
             "connect_volume": 100,
             "audio_quality": 320,
+            "surround_mode": "off",
+            "speaker_volumes": [100] * 8,
         }
 
     def _load_spotify_settings(self) -> Dict[str, Any]:
@@ -5751,13 +5796,29 @@ class Plugin:
             data["audio_quality"] = 320
         if data["audio_quality"] not in {96, 160, 320}:
             data["audio_quality"] = 320
+        data["surround_mode"] = str(data.get("surround_mode", "off"))
+        if data["surround_mode"] not in {"off", "5.1", "7.1"}:
+            data["surround_mode"] = "off"
+        raw_speaker_volumes = data.get("speaker_volumes")
+        if not isinstance(raw_speaker_volumes, list):
+            raw_speaker_volumes = []
+        data["speaker_volumes"] = [
+            clamp_value(raw_speaker_volumes[index] if index < len(raw_speaker_volumes) else 100, 0, 100)
+            for index in range(8)
+        ]
         data["client_id"] = str(data.get("client_id", "")).strip()
         data["access_token"] = str(data.get("access_token", ""))
         data["refresh_token"] = str(data.get("refresh_token", ""))
+        data["playback_access_token"] = str(data.get("playback_access_token", ""))
+        data["playback_refresh_token"] = str(data.get("playback_refresh_token", ""))
         try:
             data["expires_at"] = float(data.get("expires_at", 0.0) or 0.0)
         except Exception:
             data["expires_at"] = 0.0
+        try:
+            data["playback_expires_at"] = float(data.get("playback_expires_at", 0.0) or 0.0)
+        except Exception:
+            data["playback_expires_at"] = 0.0
         try:
             data["rate_limit_until"] = float(data.get("rate_limit_until", 0.0) or 0.0)
         except Exception:
@@ -5798,6 +5859,7 @@ class Plugin:
             "clientId": str(self.spotify_settings.get("client_id", "")),
             "redirectUri": self.spotify_redirect_uri,
             "authenticated": bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")),
+            "playbackAuthenticated": bool(self.spotify_settings.get("playback_refresh_token") or self.spotify_settings.get("playback_access_token")),
             "compactSavedTracks": bool(self.spotify_settings.get("compact_saved_tracks", True)),
             "audioQuality": int(self.spotify_settings.get("audio_quality", 320) or 320),
             "displayName": str(profile.get("display_name", "")) if isinstance(profile, dict) else "",
@@ -5826,9 +5888,43 @@ class Plugin:
             self.spotify_settings["audio_quality"] = requested
             self._save_spotify_settings()
             await self._run_in_executor(self._spotify_executor, self._spotify_playback_bridge_stop_sync)
-            if self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token"):
+            if self.spotify_settings.get("playback_refresh_token") or self.spotify_settings.get("playback_access_token"):
                 await self._run_in_executor(self._spotify_executor, self._spotify_playback_bridge_start_sync)
         return self._spotify_public_settings()
+
+    async def get_surround_settings(self) -> Dict[str, Any]:
+        return {
+            "mode": str(self.spotify_settings.get("surround_mode", "off")),
+            "speakerVolumes": list(self.spotify_settings.get("speaker_volumes") or [100] * 8),
+        }
+
+    async def set_surround_settings(self, mode: str, speaker_volumes: List[int]) -> Dict[str, Any]:
+        requested_mode = str(mode or "off")
+        if requested_mode not in {"off", "5.1", "7.1"}:
+            requested_mode = "off"
+        requested_volumes = [
+            clamp_value(speaker_volumes[index] if isinstance(speaker_volumes, list) and index < len(speaker_volumes) else 100, 0, 100)
+            for index in range(8)
+        ]
+        self.spotify_settings["surround_mode"] = requested_mode
+        self.spotify_settings["speaker_volumes"] = requested_volumes
+        self._save_spotify_settings()
+        if self._spotify_playback_bridge_process is not None:
+            result = await self._run_in_executor(
+                self._spotify_executor,
+                self._spotify_playback_bridge_request_sync,
+                "/action/surround",
+                1.0,
+                {"mode": requested_mode, "speakerVolumes": requested_volumes},
+            )
+            if not result.get("ok"):
+                self._record_diagnostic_event(
+                    "spotify",
+                    "surround_update_failed",
+                    {"mode": requested_mode, "error": str(result.get("error") or self._spotify_playback_bridge_error)},
+                    "warning",
+                )
+        return {"mode": requested_mode, "speakerVolumes": requested_volumes}
 
     def _clear_spotify_audio_cache_sync(self) -> Dict[str, Any]:
         cache_root = os.path.abspath(os.path.join(self.spotify_settings_dir, "spotify-audio-cache"))
@@ -5850,7 +5946,7 @@ class Plugin:
             shutil.rmtree(cache_root)
         os.makedirs(cache_root, exist_ok=True)
         restarted = False
-        if self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token"):
+        if self.spotify_settings.get("playback_refresh_token") or self.spotify_settings.get("playback_access_token"):
             restarted = self._spotify_playback_bridge_start_sync()
         return {"files": files, "bytes": bytes_removed, "restarted": restarted}
 
@@ -6182,6 +6278,15 @@ class Plugin:
                 server.shutdown()
             except Exception:
                 pass
+
+    def _stop_spotify_playback_auth_server(self) -> None:
+        server = self._spotify_playback_auth_server
+        self._spotify_playback_auth_server = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
             try:
                 server.server_close()
             except Exception:
@@ -6232,6 +6337,138 @@ class Plugin:
         if isinstance(profile, dict):
             self.spotify_settings["profile"] = profile
             self._save_spotify_settings()
+
+    def _spotify_exchange_playback_code(self, code: str) -> None:
+        verifier = self._spotify_playback_code_verifier
+        if not verifier:
+            raise RuntimeError("Spotify playback authorization session expired")
+        tokens = self._spotify_token_request({
+            "client_id": self.spotify_playback_client_id,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.spotify_playback_redirect_uri,
+            "code_verifier": verifier,
+        })
+        access_token = str(tokens.get("access_token", ""))
+        refresh_token = str(tokens.get("refresh_token", ""))
+        if not access_token or not refresh_token:
+            raise RuntimeError("Spotify did not return reusable playback credentials")
+        self.spotify_settings["playback_access_token"] = access_token
+        self.spotify_settings["playback_refresh_token"] = refresh_token
+        self.spotify_settings["playback_expires_at"] = time.time() + max(60, int(tokens.get("expires_in", 3600)))
+        self.spotify_settings["playback_scope"] = str(tokens.get("scope", ""))
+        self._save_spotify_settings()
+        self._spotify_playback_bridge_retry_at = 0.0
+
+    def _spotify_handle_playback_auth_callback(self, query: Dict[str, List[str]]) -> Tuple[bool, str]:
+        supplied_state = (query.get("state") or [""])[0]
+        error = (query.get("error") or [""])[0]
+        code = (query.get("code") or [""])[0]
+        with self._spotify_auth_lock:
+            expected_state = self._spotify_playback_auth_state
+            if error:
+                message = f"Spotify playback authorization: {error}"
+                self._spotify_auth_status = {"state": "error", "message": message}
+                return False, message
+            if not code or not supplied_state or supplied_state != expected_state:
+                message = "Invalid Spotify playback authorization response"
+                self._spotify_auth_status = {"state": "error", "message": message}
+                return False, message
+            self._spotify_auth_status = {"state": "exchanging", "message": "Finishing Spotify playback connection"}
+        try:
+            self._spotify_exchange_playback_code(code)
+            started = self._spotify_playback_bridge_start_with_recovery_sync()
+            if not started:
+                raise RuntimeError(self._spotify_playback_bridge_error or "Spotify playback helper did not start")
+            profile = self.spotify_settings.get("profile") or {}
+            name = str(profile.get("display_name") or profile.get("id") or "Spotify") if isinstance(profile, dict) else "Spotify"
+            message = f"Connected as {name}"
+            with self._spotify_auth_lock:
+                self._spotify_auth_status = {"state": "authenticated", "message": message}
+            return True, message
+        except Exception as exc:
+            message = str(exc)
+            with self._spotify_auth_lock:
+                self._spotify_auth_status = {"state": "error", "message": message}
+            return False, message
+        finally:
+            with self._spotify_auth_lock:
+                self._spotify_playback_auth_state = ""
+                self._spotify_playback_code_verifier = ""
+
+    def _start_spotify_playback_auth_server(self) -> None:
+        self._stop_spotify_playback_auth_server()
+        plugin = self
+
+        class SpotifyPlaybackCallbackHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path != "/login":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                ok, message = plugin._spotify_handle_playback_auth_callback(urllib.parse.parse_qs(parsed.query))
+                title = "Spotify connected" if ok else "Spotify connection failed"
+                color = "#1DB954" if ok else "#ff5c5c"
+                safe_message = str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                body = f"""<!doctype html><html><head><meta charset='utf-8'><title>{title}</title>
+<style>body{{margin:0;background:#0b0b0b;color:#fff;font-family:Segoe UI,Arial,sans-serif;display:grid;place-items:center;min-height:100vh}}main{{max-width:560px;padding:40px;text-align:center}}h1{{color:{color};font-size:30px}}p{{color:#cfcfcf;line-height:1.5}}</style></head>
+<body><main><h1>{title}</h1><p>{safe_message}</p><p>You can close this window and return to Steam.</p></main></body></html>"""
+                encoded = body.encode("utf-8")
+                self.send_response(200 if ok else 400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                threading.Thread(target=plugin._stop_spotify_playback_auth_server, daemon=True).start()
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        class SpotifyPlaybackCallbackServer(http.server.ThreadingHTTPServer):
+            allow_reuse_address = True
+
+        try:
+            server = SpotifyPlaybackCallbackServer(("127.0.0.1", self.spotify_playback_redirect_port), SpotifyPlaybackCallbackHandler)
+            server.daemon_threads = True
+            self._spotify_playback_auth_server = server
+            self._spotify_playback_auth_thread = threading.Thread(target=server.serve_forever, daemon=True, name="NowPlaying-SpotifyPlaybackOAuth")
+            self._spotify_playback_auth_thread.start()
+        except OSError as exc:
+            raise RuntimeError(f"Unable to open Spotify playback callback port {self.spotify_playback_redirect_port}: {exc}") from exc
+
+    def _spotify_begin_playback_auth_sync(self) -> Dict[str, Any]:
+        self._start_spotify_playback_auth_server()
+        verifier, challenge = self._spotify_pkce_pair()
+        state = base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
+        scopes = " ".join([
+            "streaming", "user-read-private", "user-read-playback-state",
+            "user-read-currently-playing", "user-modify-playback-state",
+        ])
+        with self._spotify_auth_lock:
+            self._spotify_playback_code_verifier = verifier
+            self._spotify_playback_auth_state = state
+            self._spotify_auth_status = {"state": "waiting", "message": "Waiting for Spotify playback authorization"}
+        params = {
+            "client_id": self.spotify_playback_client_id,
+            "response_type": "code",
+            "redirect_uri": self.spotify_playback_redirect_uri,
+            "code_challenge_method": "S256",
+            "code_challenge": challenge,
+            "state": state,
+            "scope": scopes,
+        }
+        url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(params)
+        self._spotify_open_url(url)
+        return {"ok": True, "url": url, "redirectUri": self.spotify_playback_redirect_uri}
+
+    async def begin_spotify_playback_auth(self) -> Dict[str, Any]:
+        try:
+            return await self._run_in_executor(self._spotify_executor, self._spotify_begin_playback_auth_sync)
+        except Exception as exc:
+            with self._spotify_auth_lock:
+                self._spotify_auth_status = {"state": "error", "message": str(exc)}
+            return {"ok": False, "error": str(exc)}
 
     def _spotify_handle_auth_callback(self, query: Dict[str, List[str]]) -> Tuple[bool, str]:
         supplied_state = (query.get("state") or [""])[0]
@@ -6370,10 +6607,16 @@ class Plugin:
 
     async def disconnect_spotify(self) -> Dict[str, Any]:
         self._stop_spotify_auth_server()
+        self._stop_spotify_playback_auth_server()
+        await self._run_in_executor(self._spotify_executor, self._spotify_playback_bridge_stop_sync)
         self.spotify_settings["access_token"] = ""
         self.spotify_settings["refresh_token"] = ""
         self.spotify_settings["expires_at"] = 0.0
         self.spotify_settings["scope"] = ""
+        self.spotify_settings["playback_access_token"] = ""
+        self.spotify_settings["playback_refresh_token"] = ""
+        self.spotify_settings["playback_expires_at"] = 0.0
+        self.spotify_settings["playback_scope"] = ""
         self.spotify_settings["profile"] = {}
         self.spotify_settings["rate_limit_until"] = 0.0
         self._spotify_rate_limit_until = 0.0
@@ -6415,6 +6658,35 @@ class Plugin:
             if not force_refresh and token and expires_at > time.time() + 45:
                 return token
             return self._spotify_refresh_access_token_locked()
+
+    def _spotify_refresh_playback_access_token_locked(self) -> str:
+        refresh_token = str(self.spotify_settings.get("playback_refresh_token", ""))
+        if not refresh_token:
+            raise RuntimeError("Spotify playback is not connected")
+        tokens = self._spotify_token_request({
+            "client_id": self.spotify_playback_client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        })
+        access_token = str(tokens.get("access_token", ""))
+        if not access_token:
+            raise RuntimeError("Spotify did not return a new playback token")
+        self.spotify_settings["playback_access_token"] = access_token
+        if tokens.get("refresh_token"):
+            self.spotify_settings["playback_refresh_token"] = str(tokens.get("refresh_token"))
+        self.spotify_settings["playback_expires_at"] = time.time() + max(60, int(tokens.get("expires_in", 3600)))
+        if tokens.get("scope"):
+            self.spotify_settings["playback_scope"] = str(tokens.get("scope"))
+        self._save_spotify_settings()
+        return access_token
+
+    def _spotify_playback_access_token(self, force_refresh: bool = False) -> str:
+        with self._spotify_token_lock:
+            token = str(self.spotify_settings.get("playback_access_token", ""))
+            expires_at = float(self.spotify_settings.get("playback_expires_at", 0.0) or 0.0)
+            if not force_refresh and token and expires_at > time.time() + 45:
+                return token
+            return self._spotify_refresh_playback_access_token_locked()
 
     def _spotify_rate_limit_status_sync(self) -> Dict[str, Any]:
         now = time.time()
@@ -7760,7 +8032,7 @@ class Plugin:
         session = connection = request = None
         try:
             session = winhttp.WinHttpOpen(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.2.0",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.4.0",
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 None,
                 None,
@@ -7951,7 +8223,7 @@ class Plugin:
         params = {"query": f'artist:"{name}"', "fmt": "json", "limit": max(8, min(25, int(limit) * 3))}
         request = urllib.request.Request(
             "https://musicbrainz.org/ws/2/artist/?" + urllib.parse.urlencode(params),
-            headers={"User-Agent": "NowPlayingDecky/2.2.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
+            headers={"User-Agent": "NowPlayingDecky/2.4.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -8005,7 +8277,7 @@ class Plugin:
                 url = f"https://webservice.fanart.tv/{version}/music/{urllib.parse.quote(clean_mbid, safe='')}?" + urllib.parse.urlencode({"api_key": api_key})
                 request = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "NowPlayingDecky/2.2.0", "Accept": "application/json"},
+                    headers={"User-Agent": "NowPlayingDecky/2.4.0", "Accept": "application/json"},
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -8053,7 +8325,7 @@ class Plugin:
             url = "https://www.theaudiodb.com/api/v1/json/2/search.php?" + urllib.parse.urlencode({"s": name})
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "NowPlayingDecky/2.2.0", "Accept": "application/json"},
+                headers={"User-Agent": "NowPlayingDecky/2.4.0", "Accept": "application/json"},
             )
             try:
                 with urllib.request.urlopen(request, timeout=8) as response:
@@ -9187,7 +9459,7 @@ class Plugin:
                         "/action/load?" + urllib.parse.urlencode(query),
                         2.0,
                     )
-                    if bridge_result.get("ok"):
+                    if bridge_result.get("ok") and self._spotify_wait_for_bridge_playback_sync():
                         self._spotify_invalidate_playback_cache(True)
                         played_context = context_uri or (uri if uri.startswith("spotify:playlist:") else "")
                         if played_context.startswith("spotify:playlist:"):
@@ -9252,7 +9524,7 @@ class Plugin:
                         2.5,
                         {"uris": cleaned, "start_index": index},
                     )
-                    if bridge_result.get("ok"):
+                    if bridge_result.get("ok") and self._spotify_wait_for_bridge_playback_sync():
                         self._spotify_invalidate_playback_cache(True)
                         return {
                             "deviceId": "Playhub Now Playing",
@@ -9479,7 +9751,7 @@ class Plugin:
         now_mono = time.monotonic()
         report = {
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "pluginVersion": "2.2.0",
+            "pluginVersion": "2.4.0",
             "python": sys.version,
             "platform": platform.platform(),
             "backend": {
@@ -9593,7 +9865,7 @@ class Plugin:
         operation_durations["totalBeforeWrite"] = round((time.monotonic() - diagnostic_started) * 1000, 1)
         runtime_logs = self._read_runtime_logs_for_diagnostics()
         content = (
-            "NOW PLAYING 2.2.0 DIAGNOSTICS\n"
+            "NOW PLAYING 2.4.0 DIAGNOSTICS\n"
             + json.dumps(report, ensure_ascii=False, indent=2)
             + "\n\nSTRUCTURED EVENTS (oldest to newest)\n"
             + "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in structured_events)
@@ -9818,7 +10090,7 @@ class Plugin:
         try:
             request = urllib.request.Request(
                 f"http://127.0.0.1:{TOPBAR_CEF_PORT}/json/list",
-                headers={"User-Agent": "Decky Now Playing/2.2.0"},
+                headers={"User-Agent": "Decky Now Playing/2.4.0"},
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 targets = json.loads(response.read().decode("utf-8"))
@@ -9956,10 +10228,17 @@ class Plugin:
             return
         if not str(self.spotify_settings.get("client_id") or "").strip():
             return
-        if not bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")):
+        if not bool(self.spotify_settings.get("playback_refresh_token") or self.spotify_settings.get("playback_access_token")):
             return
         try:
-            started = await self._run_in_executor(self._spotify_executor, self._spotify_playback_bridge_start_sync)
+            # Steam and Decky can come up before networking and the Windows audio
+            # stack have settled. A short non-blocking delay makes cold boots
+            # reliable without slowing plugin or QAM startup.
+            await asyncio.sleep(1.5)
+            started = await self._run_in_executor(
+                self._spotify_executor,
+                self._spotify_playback_bridge_start_with_recovery_sync,
+            )
             if started:
                 profile = self.spotify_settings.get("profile") or {}
                 display_name = str(profile.get("display_name") or profile.get("id") or "Spotify") if isinstance(profile, dict) else "Spotify"
@@ -9980,7 +10259,7 @@ class Plugin:
         while True:
             delay = 1.2
             try:
-                if not bool(self.spotify_settings.get("refresh_token") or self.spotify_settings.get("access_token")):
+                if not bool(self.spotify_settings.get("playback_refresh_token") or self.spotify_settings.get("playback_access_token")):
                     previous_status = ""
                     previous_uri = ""
                     session_volume_applied = False
@@ -10020,24 +10299,10 @@ class Plugin:
                         self._save_spotify_settings()
                         self._spotify_connect_volume_changed_at = time.monotonic()
 
-                    playback_started = status == "Playing" and (
-                        previous_status != "Playing" or (uri and uri != previous_uri)
-                    )
-                    if (
-                        playback_started
-                        and self._normalized_active_service() != "spotify"
-                        and time.monotonic() >= self._spotify_auto_source_suppress_until
-                    ):
-                        previous_service = self._normalized_active_service()
-                        self.active_service = "spotify"
-                        self._source_behavior_settings["active_service"] = "spotify"
-                        self._save_source_behavior_settings()
-                        self._topbar_cached_at = 0.0
-                        self._record_diagnostic_event(
-                            "spotify",
-                            "connect_playback_adopted",
-                            {"previousService": previous_service, "uri": uri},
-                        )
+                    # Keep Spotify authenticated and responsive in the background, but
+                    # never let a remote Connect event replace the source the user chose.
+                    # Source changes are explicit UI actions; background sessions only
+                    # update their own cached state.
                 else:
                     session_volume_applied = False
 

@@ -24,7 +24,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "vendor") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "licenses") | Out-Null
 
 if (Test-Path (Join-Path $Root "bin/AppVolumeBridge.exe")) {
-  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.3.0 uses direct Windows Core Audio."
+  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.4.0 uses direct Windows Core Audio."
 }
 
 if (Test-Path (Join-Path $Root "node_modules")) {
@@ -89,7 +89,7 @@ Compress-Archive -Path $Stage -DestinationPath $Zip -Force
 Copy-Item $Zip $PublicZip -Force
 
 New-Item -ItemType Directory -Force -Path $ProjectStage | Out-Null
-$ProjectExclude = @("release", "node_modules", "__pycache__", ".pnpm-store")
+$ProjectExclude = @(".git", "release", "node_modules", "__pycache__", ".pnpm-store")
 Get-ChildItem -LiteralPath $Root -Force | Where-Object {
   $ProjectExclude -notcontains $_.Name
 } | ForEach-Object {

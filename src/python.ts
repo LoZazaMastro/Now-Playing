@@ -252,6 +252,7 @@ export type SpotifyPlusSettings = {
   clientId: string;
   redirectUri: string;
   authenticated: boolean;
+  playbackAuthenticated?: boolean;
   compactSavedTracks?: boolean;
   audioQuality?: 96 | 160 | 320;
   displayName?: string;
@@ -407,6 +408,18 @@ export function setSpotifyClientId(clientId: string): Promise<SpotifyPlusSetting
 
 export function beginSpotifyAuth(): Promise<{ ok: boolean; url?: string; redirectUri?: string; error?: string }> {
   return call<[], { ok: boolean; url?: string; redirectUri?: string; error?: string }>("begin_spotify_auth");
+}
+
+export function beginSpotifyPlaybackAuth(): Promise<{ ok: boolean; url?: string; redirectUri?: string; error?: string }> {
+  return call<[], { ok: boolean; url?: string; redirectUri?: string; error?: string }>("begin_spotify_playback_auth");
+}
+
+export function getSurroundSettings(): Promise<{ mode: "off" | "5.1" | "7.1"; speakerVolumes: number[] }> {
+  return call<[], { mode: "off" | "5.1" | "7.1"; speakerVolumes: number[] }>("get_surround_settings");
+}
+
+export function setSurroundSettings(mode: "off" | "5.1" | "7.1", speakerVolumes: number[]): Promise<{ mode: "off" | "5.1" | "7.1"; speakerVolumes: number[] }> {
+  return call<[mode: string, speakerVolumes: number[]], { mode: "off" | "5.1" | "7.1"; speakerVolumes: number[] }>("set_surround_settings", mode, speakerVolumes);
 }
 
 export function getSpotifyAuthStatus(): Promise<SpotifyAuthStatus> {

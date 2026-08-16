@@ -346,11 +346,21 @@ def test_spotify_playback_requires_streaming_scope_without_spawning() -> None:
     plugin._spotify_playback_bridge_retry_at = 0.0
     plugin.spotify_playback_bridge_path = str(ROOT / "bin" / "SpotifyPlaybackBridge.exe")
     plugin.spotify_playback_bridge_cache_root = os.path.join(tempfile.gettempdir(), "NowPlaying-SpotifyPlaybackBridge-test")
-    plugin.spotify_settings = {"scope": "user-read-playback-state user-modify-playback-state"}
+    plugin.spotify_settings = {"playback_scope": "user-read-playback-state user-modify-playback-state"}
     assert plugin._spotify_playback_bridge_start_sync() is False
     assert plugin._spotify_playback_bridge_process is None
-    assert "Reconnect Spotify" in plugin._spotify_playback_bridge_error
+    assert "playback authorization" in plugin._spotify_playback_bridge_error
     assert plugin._spotify_playback_bridge_retry_at > 0
+
+
+def test_spotify_surround_updates_without_restarting_playback() -> None:
+    backend_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    method = backend_source.split("async def set_surround_settings", 1)[1].split("def _clear_spotify_audio_cache_sync", 1)[0]
+    bridge_source = (ROOT / "SpotifyPlaybackBridge" / "src" / "main.rs").read_text(encoding="utf-8")
+    assert "_spotify_playback_bridge_stop_sync" not in method
+    assert '"/action/surround"' in method
+    assert 'path == "/action/surround"' in bridge_source
+    assert "Arc<RwLock<SurroundConfig>>" in bridge_source
 
 
 def test_youtube_music_chromium_header_normalization() -> None:
@@ -385,6 +395,7 @@ def main() -> None:
     test_helper_recovery_architecture()
     test_spotify_playback_helper_is_owned_by_plugin()
     test_spotify_playback_requires_streaming_scope_without_spawning()
+    test_spotify_surround_updates_without_restarting_playback()
     test_youtube_music_chromium_header_normalization()
     print("Runtime smoke tests OK: ranges, 6 external sources, generic and direct WinRT SMTC fallbacks, canonical empty snapshots, local state, Spotify bridge authority, zero Web API polling while the bridge is ready, integrated Spotify volume, playback scope guard, helper ownership, interactive-session MediaBridge recovery, Chromium YouTube Music headers, and in-process fanart.tv transports without external curl.")
 

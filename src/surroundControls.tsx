@@ -1,9 +1,10 @@
 import { DialogButton, Focusable, GamepadButton } from "@decky/ui";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { FaChevronDown, FaChevronUp } from "react-icons/fa";
 import { localAudioPlayer } from "./localAudio";
 import { getTranslations } from "./i18n";
+import * as python from "./python";
 
 // WebAudio discrete channel order: FL, FR, FC, LFE, SL, SR, BL, BR.
 // 5.1 uses the first 6; 7.1 uses all 8.
@@ -17,16 +18,43 @@ export function SurroundUpmixControls({ accent = "#66c0f4", cardStyle }: { accen
   const [mode, setMode] = useState<"off" | "5.1" | "7.1">(() => localAudioPlayer.getSurroundMode());
   const [expanded, setExpanded] = useState(false);
   const [volumes, setVolumes] = useState<number[]>(() => localAudioPlayer.getSpeakerVolumes());
+  const backendSyncTimer = useRef<number>(0);
   const channels = mode === "7.1" ? 8 : mode === "5.1" ? 6 : 0;
+
+  useEffect(() => {
+    let active = true;
+    void python.getSurroundSettings().then((saved) => {
+      if (!active) return;
+      setMode(saved.mode);
+      setVolumes(saved.speakerVolumes);
+      localAudioPlayer.setSurroundMode(saved.mode);
+      saved.speakerVolumes.forEach((value, index) => localAudioPlayer.setSpeakerVolume(index, value));
+    }).catch(() => {});
+    return () => {
+      active = false;
+      if (backendSyncTimer.current) window.clearTimeout(backendSyncTimer.current);
+    };
+  }, []);
+
+  const syncBackend = (nextMode: "off" | "5.1" | "7.1", nextVolumes: number[]) => {
+    if (backendSyncTimer.current) window.clearTimeout(backendSyncTimer.current);
+    backendSyncTimer.current = window.setTimeout(() => void python.setSurroundSettings(nextMode, nextVolumes), 180);
+  };
 
   const choose = (target: "5.1" | "7.1") => {
     const next = mode === target ? "off" : target;
     setMode(next);
     localAudioPlayer.setSurroundMode(next);
+    syncBackend(next, volumes);
   };
   const setVol = (index: number, value: number) => {
     const clamped = Math.max(0, Math.min(100, Math.round(value)));
-    setVolumes((prev) => { const next = [...prev]; next[index] = clamped; return next; });
+    setVolumes((prev) => {
+      const next = [...prev];
+      next[index] = clamped;
+      syncBackend(mode, next);
+      return next;
+    });
     localAudioPlayer.setSpeakerVolume(index, clamped);
   };
   const nudge = (index: number) => (event: any) => {

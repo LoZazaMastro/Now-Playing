@@ -1154,7 +1154,9 @@ class YouTubeMusicService:
                 self._stream_inflight[cache_key] = event
         if not owner:
             assert event is not None
-            event.wait(24.0)
+            # Playback must never sit behind a slow speculative prefetch. After
+            # a short grace period the foreground request resolves independently.
+            event.wait(6.0)
             with self._lock:
                 cached = self._stream_cache.get(cache_key)
                 if cached and float(cached.get("expiresAt") or 0) > time.time() + 60:
