@@ -2,7 +2,10 @@ use std::{
     io::{self, BufRead},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -12,8 +15,8 @@ use librespot::{
     core::{Session, SessionConfig, authentication::Credentials, cache::Cache},
     metadata::audio::UniqueFields,
     playback::{
-        audio_backend::{self, Sink, SinkResult},
-        config::{AudioFormat, Bitrate, PlayerConfig},
+        audio_backend::{Sink, SinkError, SinkResult},
+        config::{Bitrate, PlayerConfig},
         convert::Converter,
         decoder::AudioPacket,
         mixer::{self, MixerConfig},
@@ -40,6 +43,9 @@ struct Snapshot {
     length: u32,
     volume: u8,
     audio_level: f32,
+    audio_ready: bool,
+    audio_packets: u64,
+    audio_recoveries: u32,
     shuffle_active: bool,
     repeat_mode: String,
     surround_mode: String,
@@ -62,6 +68,9 @@ impl Default for Snapshot {
             length: 0,
             volume: 100,
             audio_level: 0.0,
+            audio_ready: false,
+            audio_packets: 0,
+            audio_recoveries: 0,
             media_type: String::new(),
             shuffle_active: false,
             repeat_mode: "Off".into(),
@@ -78,11 +87,14 @@ struct MeteredSink {
     last_sample: Instant,
 }
 
-struct SurroundRodioSink {
-    sink: rodio::Sink,
-    _stream: rodio::OutputStream,
+struct DynamicRodioSink {
+    sink: Option<rodio::Sink>,
+    stream: Option<rodio::OutputStream>,
     channels: u16,
     config: Arc<RwLock<SurroundConfig>>,
+    state: Arc<RwLock<Snapshot>>,
+    stream_failed: Arc<AtomicBool>,
+    stream_generation: Arc<AtomicU64>,
     lfe_state: f32,
 }
 
@@ -92,35 +104,129 @@ struct SurroundConfig {
     gains: [f32; 8],
 }
 
-impl SurroundRodioSink {
-    fn new(config: Arc<RwLock<SurroundConfig>>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut stream = rodio::OutputStreamBuilder::from_default_device()?.open_stream_or_fallback()?;
+impl DynamicRodioSink {
+    fn new(config: Arc<RwLock<SurroundConfig>>, state: Arc<RwLock<Snapshot>>) -> Self {
+        Self {
+            sink: None,
+            stream: None,
+            channels: 0,
+            config,
+            state,
+            stream_failed: Arc::new(AtomicBool::new(false)),
+            stream_generation: Arc::new(AtomicU64::new(0)),
+            lfe_state: 0.0,
+        }
+    }
+
+    fn open_default_output(&mut self, recovering: bool) -> Result<(), String> {
+        let generation = self.stream_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let callback_generation = self.stream_generation.clone();
+        let stream_failed = Arc::new(AtomicBool::new(false));
+        let callback_failed = stream_failed.clone();
+        let callback_state = self.state.clone();
+        let mut stream = rodio::OutputStreamBuilder::from_default_device()
+            .map_err(|error| error.to_string())?
+            .with_error_callback(move |error| {
+                if callback_generation.load(Ordering::Acquire) != generation {
+                    return;
+                }
+                callback_failed.store(true, Ordering::Release);
+                if let Ok(mut snapshot) = callback_state.write() {
+                    snapshot.audio_ready = false;
+                    snapshot.error = format!("Audio output unavailable: {error}");
+                }
+                eprintln!("audio stream error: {error}");
+            })
+            .open_stream_or_fallback()
+            .map_err(|error| error.to_string())?;
         stream.log_on_drop(false);
         let channels = stream.config().channel_count();
-        if channels < 6 {
-            return Err("default output does not expose surround channels".into());
+        if channels == 0 {
+            return Err("default output exposes no audio channels".into());
         }
         let sink = rodio::Sink::connect_new(stream.mixer());
-        Ok(Self { sink, _stream: stream, channels, config, lfe_state: 0.0 })
+        sink.play();
+        self.channels = channels;
+        self.sink = Some(sink);
+        self.stream = Some(stream);
+        self.stream_failed = stream_failed;
+        self.lfe_state = 0.0;
+
+        if let Ok(mut snapshot) = self.state.write() {
+            let configured_mode = self.config.read().unwrap().mode.clone();
+            snapshot.audio_ready = true;
+            snapshot.output_channels = channels;
+            snapshot.surround_mode = if channels >= 6 {
+                configured_mode
+            } else {
+                "off".into()
+            };
+            if recovering {
+                snapshot.audio_recoveries = snapshot.audio_recoveries.saturating_add(1);
+            }
+            if snapshot.error.starts_with("Audio output") {
+                snapshot.error.clear();
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_output(&mut self) -> SinkResult<()> {
+        let failed = self.stream_failed.swap(false, Ordering::AcqRel);
+        if self.sink.is_some() && self.stream.is_some() && !failed {
+            return Ok(());
+        }
+
+        let recovering = failed || self.sink.is_some() || self.stream.is_some();
+        self.sink = None;
+        self.stream = None;
+        let mut last_error = "audio output is not ready".to_owned();
+        for attempt in 0..24 {
+            match self.open_default_output(recovering) {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = error,
+            }
+            if attempt < 23 {
+                thread::sleep(Duration::from_millis(125));
+            }
+        }
+        if let Ok(mut snapshot) = self.state.write() {
+            snapshot.audio_ready = false;
+            snapshot.error = format!("Audio output unavailable: {last_error}");
+        }
+        Err(SinkError::ConnectionRefused(last_error))
     }
 }
 
-impl Sink for SurroundRodioSink {
+impl Sink for DynamicRodioSink {
     fn start(&mut self) -> SinkResult<()> {
-        self.sink.play();
+        self.ensure_output()?;
+        if let Some(sink) = self.sink.as_ref() {
+            sink.play();
+        }
         Ok(())
     }
 
     fn stop(&mut self) -> SinkResult<()> {
-        self.sink.sleep_until_end();
-        self.sink.pause();
+        self.stream_generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(sink) = self.sink.take() {
+            sink.stop();
+        }
+        self.stream = None;
+        self.channels = 0;
+        self.stream_failed.store(false, Ordering::Release);
+        if let Ok(mut snapshot) = self.state.write() {
+            snapshot.audio_ready = false;
+            snapshot.audio_level = 0.0;
+        }
         Ok(())
     }
 
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
-        let samples = packet.samples().map_err(|error| {
-            librespot::playback::audio_backend::SinkError::OnWrite(error.to_string())
-        })?;
+        self.ensure_output()?;
+        let samples = packet
+            .samples()
+            .map_err(|error| SinkError::OnWrite(error.to_string()))?;
         let stereo = converter.f64_to_f32(samples);
         let channels = self.channels as usize;
         let config = self.config.read().unwrap().clone();
@@ -132,6 +238,10 @@ impl Sink for SurroundRodioSink {
         for frame in stereo.chunks_exact(2) {
             let left = frame[0];
             let right = frame[1];
+            if channels == 1 {
+                output.push(((left + right) * 0.5 * HEADROOM).clamp(-1.0, 1.0));
+                continue;
+            }
             if config.mode == "off" {
                 // Keep perceived loudness consistent when switching surround modes.
                 // Speaker trims remain exclusive to upmix, but the shared headroom
@@ -162,12 +272,36 @@ impl Sink for SurroundRodioSink {
                 mixed[5] = side_right;
             }
             for channel in 0..channels {
-                output.push((mixed[channel.min(7)] * config.gains[channel.min(7)] * HEADROOM).clamp(-1.0, 1.0));
+                output.push(
+                    (mixed[channel.min(7)] * config.gains[channel.min(7)] * HEADROOM)
+                        .clamp(-1.0, 1.0),
+                );
             }
         }
-        self.sink.append(rodio::buffer::SamplesBuffer::new(self.channels, 44_100, output));
-        while self.sink.len() > 26 {
+        let sink = self
+            .sink
+            .as_ref()
+            .ok_or_else(|| SinkError::NotConnected("audio output is not ready".into()))?;
+        sink.append(rodio::buffer::SamplesBuffer::new(
+            self.channels,
+            44_100,
+            output,
+        ));
+        while sink.len() > 26 {
+            // A failed endpoint no longer drains Rodio's queue. Leave this write
+            // promptly so the next decoded packet can reopen the current default
+            // device instead of waiting forever on the abandoned stream.
+            if self.stream_failed.load(Ordering::Acquire) {
+                break;
+            }
             thread::sleep(Duration::from_millis(10));
+        }
+        if let Ok(mut snapshot) = self.state.write() {
+            let output_live = !self.stream_failed.load(Ordering::Acquire);
+            snapshot.audio_ready = output_live;
+            if output_live {
+                snapshot.audio_packets = snapshot.audio_packets.saturating_add(1);
+            }
         }
         Ok(())
     }
@@ -288,7 +422,10 @@ fn handle_request(
             .ok()
             .and_then(|_| serde_json::from_str::<SurroundBody>(&body).ok());
         let Some(payload) = payload else {
-            let _ = request.respond(json_response(serde_json::json!({"ok": false, "error": "invalid-body"}), 400));
+            let _ = request.respond(json_response(
+                serde_json::json!({"ok": false, "error": "invalid-body"}),
+                400,
+            ));
             return true;
         };
         let mode = match payload.mode.as_str() {
@@ -299,9 +436,16 @@ fn handle_request(
         for (index, value) in payload.speaker_volumes.iter().take(8).enumerate() {
             gains[index] = (*value as f32 / 100.0).clamp(0.0, 1.0);
         }
-        *surround.write().unwrap() = SurroundConfig { mode: mode.clone(), gains };
+        *surround.write().unwrap() = SurroundConfig {
+            mode: mode.clone(),
+            gains,
+        };
         let mut snapshot = state.write().unwrap();
-        snapshot.surround_mode = if snapshot.output_channels >= 6 { mode } else { "off".into() };
+        snapshot.surround_mode = if snapshot.output_channels >= 6 {
+            mode
+        } else {
+            "off".into()
+        };
         drop(snapshot);
         let _ = request.respond(json_response(serde_json::json!({"ok": true}), 200));
         return true;
@@ -387,7 +531,8 @@ fn handle_request(
             } else {
                 spirc.activate().and_then(|_| {
                     if context_uri.is_empty()
-                        && (uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:"))
+                        && (uri.starts_with("spotify:track:")
+                            || uri.starts_with("spotify:episode:"))
                     {
                         spirc.load(LoadRequest::from_tracks(
                             vec![uri],
@@ -399,7 +544,11 @@ fn handle_request(
                         ))
                     } else {
                         spirc.load(LoadRequest::from_context_uri(
-                            if context_uri.is_empty() { uri.clone() } else { context_uri },
+                            if context_uri.is_empty() {
+                                uri.clone()
+                            } else {
+                                context_uri
+                            },
                             LoadRequestOptions {
                                 start_playing: true,
                                 playing_track: if offset_uri.is_empty() {
@@ -425,13 +574,16 @@ fn handle_request(
                 let tracks: Vec<String> = payload
                     .uris
                     .into_iter()
-                    .filter(|uri| uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:"))
+                    .filter(|uri| {
+                        uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:")
+                    })
                     .take(300)
                     .collect();
                 if tracks.is_empty() {
                     Err(librespot::core::Error::invalid_argument("uris"))
                 } else {
-                    let start_index = payload.start_index.min(tracks.len().saturating_sub(1)) as u32;
+                    let start_index =
+                        payload.start_index.min(tracks.len().saturating_sub(1)) as u32;
                     spirc.activate().and_then(|_| {
                         spirc.load(LoadRequest::from_tracks(
                             tracks,
@@ -494,6 +646,7 @@ async fn track_events(
                 snapshot.uri = audio_item.uri.clone();
                 snapshot.length = audio_item.duration_ms;
                 snapshot.position = 0;
+                snapshot.audio_packets = 0;
                 snapshot.artwork_url = audio_item
                     .covers
                     .first()
@@ -583,9 +736,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .get("accessToken")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    let surround_mode = startup.get("surroundMode").and_then(|value| value.as_str()).unwrap_or("off").to_owned();
+    let surround_mode = startup
+        .get("surroundMode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("off")
+        .to_owned();
     let mut speaker_gains = [1.0f32; 8];
-    if let Some(values) = startup.get("speakerVolumes").and_then(|value| value.as_array()) {
+    if let Some(values) = startup
+        .get("speakerVolumes")
+        .and_then(|value| value.as_array())
+    {
         for (index, value) in values.iter().take(8).enumerate() {
             speaker_gains[index] = (value.as_f64().unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
         }
@@ -639,7 +799,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )?)
     };
     let session = Session::new(SessionConfig::default(), cache);
-    let backend = audio_backend::find(None).ok_or("audio backend unavailable")?;
     let mixer_builder = mixer::find(None).ok_or("audio mixer unavailable")?;
     let mixer = mixer_builder(MixerConfig::default())?;
     let soft_volume = mixer.get_soft_volume();
@@ -658,18 +817,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         session.clone(),
         soft_volume,
         move || {
-            let configured_mode = sink_surround_config.read().unwrap().mode.clone();
-            let (output, active_surround_mode, output_channels): (Box<dyn Sink>, String, u16) = match SurroundRodioSink::new(sink_surround_config.clone()) {
-                Ok(sink) => {
-                    let channels = sink.channels;
-                    (Box::new(sink), configured_mode, channels)
-                }
-                Err(_) => (backend(None, AudioFormat::default()), "off".into(), 2),
-            };
-            if let Ok(mut snapshot) = meter_state.write() {
-                snapshot.surround_mode = active_surround_mode;
-                snapshot.output_channels = output_channels;
-            }
+            // Constructing the Spotify session must not bind to the current Windows
+            // endpoint. Steam can finish switching its audio route after Decky has
+            // started; the sink opens lazily on the first Play and again after every
+            // pause or device-loss callback.
+            let output: Box<dyn Sink> = Box::new(DynamicRodioSink::new(
+                sink_surround_config.clone(),
+                meter_state.clone(),
+            ));
             Box::new(MeteredSink::new(output, meter_state))
         },
     );
@@ -711,7 +866,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_spirc = spirc.clone();
     tokio::task::spawn_blocking(move || {
         for request in server.incoming_requests() {
-            if !handle_request(request, &secret, &server_state, &server_spirc, &surround_config) {
+            if !handle_request(
+                request,
+                &secret,
+                &server_state,
+                &server_spirc,
+                &surround_config,
+            ) {
                 break;
             }
         }

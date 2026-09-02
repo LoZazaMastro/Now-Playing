@@ -9,6 +9,12 @@ $ProjectStage = Join-Path $Release "Now-Playing-project-$Version"
 $Zip = Join-Path $Release "Now-Playing-decky_Installer-$Version.zip"
 $PublicZip = Join-Path $Parent "Now-Playing-decky_Installer-$Version.zip"
 $PublicProjectZip = Join-Path $Parent "Now-Playing-project-$Version.zip"
+$Marker = Join-Path $Root ".playhub-release.json"
+
+@{
+  repository = "Now-Playing"
+  version = $Version
+} | ConvertTo-Json | Set-Content -LiteralPath $Marker -Encoding utf8
 
 $ResolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $ResolvedRelease = [IO.Path]::GetFullPath($Release)
@@ -24,7 +30,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "vendor") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "licenses") | Out-Null
 
 if (Test-Path (Join-Path $Root "bin/AppVolumeBridge.exe")) {
-  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.4.0 uses direct Windows Core Audio."
+  throw "AppVolumeBridge.exe must not be shipped. Now Playing 2.5.0 uses direct Windows Core Audio."
 }
 
 if (Test-Path (Join-Path $Root "node_modules")) {
@@ -68,9 +74,9 @@ Copy-Item (Join-Path $Root "bin/SpotifyPlaybackBridge.exe") (Join-Path $Stage "b
 Copy-Item (Join-Path $Root "vendor/*") (Join-Path $Stage "vendor") -Recurse -Force
 Copy-Item (Join-Path $Root "licenses/*") (Join-Path $Stage "licenses") -Recurse -Force
 Copy-Item (Join-Path $Root "package.json") $Stage
+Copy-Item $Marker $Stage
 Copy-Item (Join-Path $Root "LICENSE") $Stage
 Copy-Item (Join-Path $Root "NOTICE") $Stage
-Copy-Item (Join-Path $Root "README.md") $Stage
 
 $ResolvedStage = [IO.Path]::GetFullPath($Stage).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $InstallerGeneratedDirectories = Get-ChildItem -LiteralPath $Stage -Recurse -Directory -Force | Where-Object {
@@ -98,14 +104,24 @@ Get-ChildItem -LiteralPath $Root -Force | Where-Object {
 
 $ResolvedProjectStage = [IO.Path]::GetFullPath($ProjectStage).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $GeneratedDirectories = Get-ChildItem -LiteralPath $ProjectStage -Recurse -Directory -Force | Where-Object {
-  $_.Name -in @("target", "publish", "publish_tmp", "__pycache__", ".pytest_cache", ".pnpm-store")
+  $_.Name -in @("obj", "target", "publish", "publish_tmp", "__pycache__", ".pytest_cache", ".pnpm-store")
 } | Sort-Object { $_.FullName.Length } -Descending
 foreach ($GeneratedDirectory in $GeneratedDirectories) {
   $ResolvedGeneratedDirectory = [IO.Path]::GetFullPath($GeneratedDirectory.FullName)
   if (-not $ResolvedGeneratedDirectory.StartsWith($ResolvedProjectStage, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to remove generated project data outside the staging directory"
   }
-  Remove-Item -LiteralPath $ResolvedGeneratedDirectory -Recurse -Force
+    Remove-Item -LiteralPath $ResolvedGeneratedDirectory -Recurse -Force
+}
+$GeneratedFiles = Get-ChildItem -LiteralPath $ProjectStage -Recurse -File -Force | Where-Object {
+  $_.Name -eq "SOURCE_RECOVERY.md" -or $_.Extension -in @(".map", ".pyc", ".pyo", ".tmp", ".temp", ".bak", ".orig", ".rej", ".log")
+}
+foreach ($GeneratedFile in $GeneratedFiles) {
+  $ResolvedGeneratedFile = [IO.Path]::GetFullPath($GeneratedFile.FullName)
+  if (-not $ResolvedGeneratedFile.StartsWith($ResolvedProjectStage, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove generated project data outside the staging directory"
+  }
+  Remove-Item -LiteralPath $ResolvedGeneratedFile -Force
 }
 Compress-Archive -Path $ProjectStage -DestinationPath $PublicProjectZip -CompressionLevel Optimal -Force
 

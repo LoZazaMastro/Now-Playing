@@ -526,6 +526,7 @@ export function SpotifyPlusSettingsPanel({
         if (status.state === "authenticated" || status.state === "error") {
           if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = 0;
+          if (status.state === "authenticated") clearSpotifyLibrarySessionCaches();
           applySettings(status);
           setBusy(false);
         }
@@ -576,7 +577,9 @@ export function SpotifyPlusSettingsPanel({
   async function saveClientId() {
     try {
       setBusy(true);
+      const changed = clientId.trim() !== settings.clientId;
       const next = await python.setSpotifyClientId(clientId);
+      if (changed) clearSpotifyLibrarySessionCaches();
       applySettings(next);
       toaster.toast({ title: "Spotify", body: t.clientIdSaved, duration: 2200 });
     } catch (error: any) {
@@ -591,6 +594,7 @@ export function SpotifyPlusSettingsPanel({
       setBusy(true);
       if (clientId.trim() !== settings.clientId) {
         const next = await python.setSpotifyClientId(clientId);
+        clearSpotifyLibrarySessionCaches();
         applySettings(next);
       }
       const result = await python.beginSpotifyAuth();
@@ -933,7 +937,9 @@ export function SpotifyPlusSettingsPanel({
             disabled={refreshBusy}
             onClick={() => {
               setRefreshBusy(true);
-              void python.refreshSpotifyCache().finally(() => setRefreshBusy(false));
+              void python.refreshSpotifyCache()
+                .then((result) => { if (result?.ok) clearSpotifyLibrarySessionCaches(); })
+                .finally(() => setRefreshBusy(false));
             }}
           >
             <span><FaSyncAlt className={refreshBusy ? "npRestartSpin" : undefined} /> {t.refresh}</span>
@@ -1046,9 +1052,44 @@ type LibrarySection = "tracks" | "albums" | "playlists" | "artists";
 type DetailState = { kind: "album" | "playlist" | "artist"; id: string; title: string };
 
 const spotifyLibrarySessionCache = new Map<LibrarySection, any>();
+const spotifyLibraryHydrations = new Map<LibrarySection, Promise<any | null>>();
+let spotifyLibraryCacheRevision = 0;
+
+function spotifyLibraryEntries(payload: any, section: LibrarySection): any[] {
+  const items = section === "artists" ? payload?.artists?.items : payload?.items;
+  return Array.isArray(items) ? items : [];
+}
+
+function spotifyLibraryNeedsHydration(payload: any, section: LibrarySection): boolean {
+  const container = section === "artists" ? payload?.artists : payload;
+  const items = spotifyLibraryEntries(payload, section);
+  const total = Math.max(0, Number(container?.total ?? items.length));
+  return Boolean(container?.next) || total > items.length;
+}
+
+function hydrateSpotifyLibrary(section: LibrarySection, onReady: (value: any) => void) {
+  const revision = spotifyLibraryCacheRevision;
+  let request = spotifyLibraryHydrations.get(section);
+  if (!request) {
+    request = python.spotifyGetLibrary(section, 0, 0)
+      .then((result) => result?.ok ? (result.data ?? null) : null)
+      .catch(() => null);
+    spotifyLibraryHydrations.set(section, request);
+    void request.finally(() => {
+      if (spotifyLibraryHydrations.get(section) === request) spotifyLibraryHydrations.delete(section);
+    });
+  }
+  void request.then((value) => {
+    if (!value || revision !== spotifyLibraryCacheRevision) return;
+    spotifyLibrarySessionCache.set(section, value);
+    onReady(value);
+  });
+}
 
 function clearSpotifyLibrarySessionCaches() {
+  spotifyLibraryCacheRevision += 1;
   spotifyLibrarySessionCache.clear();
+  spotifyLibraryHydrations.clear();
 }
 
 export type SpotifyAlbumRequest = {
@@ -1070,6 +1111,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState<any>(null);
   const [librarySection, setLibrarySection] = useState<LibrarySection>("tracks");
+  const librarySectionRef = useRef<LibrarySection>("tracks");
   const [library, setLibrary] = useState<any>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [detailHistory, setDetailHistory] = useState<DetailState[]>([]);
@@ -1128,6 +1170,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
 
   const loadLibrary = useCallback((section: LibrarySection, focusItems = true, force = false) => {
     if (focusItems) requestListFocus();
+    librarySectionRef.current = section;
     setLibrarySection(section);
     setDetail(null);
     setDetailHistory([]);
@@ -1136,15 +1179,23 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
     if (!force && cached) {
       setLibrary(cached);
       setLoading(false);
+      if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(cached, section)) {
+        hydrateSpotifyLibrary(section, (complete) => {
+          if (librarySectionRef.current === section) setLibrary(complete);
+        });
+      }
       return;
     }
     void run(
-      // Saved tracks: 50 while compact, otherwise 0 = load the whole library so
-      // the user can see and play every saved track.
-      () => python.spotifyGetLibrary(section, 0, section === "tracks" ? (compactSavedTracks ? 50 : 0) : 100),
+      () => python.spotifyGetLibrary(section, 0, section === "tracks" && compactSavedTracks ? 50 : 120),
       (value) => {
         spotifyLibrarySessionCache.set(section, value);
         setLibrary(value);
+        if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(value, section)) {
+          hydrateSpotifyLibrary(section, (complete) => {
+            if (librarySectionRef.current === section) setLibrary(complete);
+          });
+        }
       },
     );
   }, [requestListFocus, run, compactSavedTracks]);
@@ -1154,7 +1205,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
     // When the saved-tracks compaction setting changes, drop the cached page and
     // re-fetch so the list reflects the new limit (50 vs the whole library).
     if (compactInitRef.current) { compactInitRef.current = false; return; }
-    spotifyLibrarySessionCache.delete("tracks");
+    clearSpotifyLibrarySessionCaches();
     if (librarySection === "tracks") loadLibrary("tracks", false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compactSavedTracks]);
@@ -1929,6 +1980,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   const coreT = useMemo(() => getTranslations("core"), []);
   const [tab, setTab] = useState<BrowserTab>("home");
   const [librarySection, setLibrarySection] = useState<LibrarySection>("tracks");
+  const librarySectionRef = useRef<LibrarySection>("tracks");
   const [history, setHistory] = useState<SpotifyTvLocation[]>([]);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [detailData, setDetailData] = useState<any>(null);
@@ -2158,21 +2210,30 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   }, [focusFirst, run]);
 
   const loadLibrary = useCallback((section: LibrarySection, force = false) => {
+    librarySectionRef.current = section;
     setLibrarySection(section);
     focusFirst();
     const cached = spotifyLibrarySessionCache.get(section);
     if (!force && cached) {
       setLibrary(cached);
       setLoading(false);
+      if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(cached, section)) {
+        hydrateSpotifyLibrary(section, (complete) => {
+          if (librarySectionRef.current === section) setLibrary(complete);
+        });
+      }
       return;
     }
     void run(
-      // Load the whole saved-tracks library when compaction is off so the Big
-      // Picture list can show and play every track (50 while compact).
-      () => python.spotifyGetLibrary(section, 0, section === "tracks" ? (compactSavedTracks ? 50 : 0) : 0),
+      () => python.spotifyGetLibrary(section, 0, section === "tracks" && compactSavedTracks ? 50 : 120),
       (value) => {
         spotifyLibrarySessionCache.set(section, value);
         setLibrary(value);
+        if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(value, section)) {
+          hydrateSpotifyLibrary(section, (complete) => {
+            if (librarySectionRef.current === section) setLibrary(complete);
+          });
+        }
       },
     );
   }, [focusFirst, run, compactSavedTracks]);
@@ -2180,7 +2241,7 @@ export function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }: 
   const compactInitBpRef = useRef(true);
   useEffect(() => {
     if (compactInitBpRef.current) { compactInitBpRef.current = false; return; }
-    spotifyLibrarySessionCache.delete("tracks");
+    clearSpotifyLibrarySessionCaches();
     if (librarySection === "tracks") loadLibrary("tracks", true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compactSavedTracks]);

@@ -1,5 +1,4 @@
 import csv
-import copy
 import ctypes
 import hashlib
 import io
@@ -792,6 +791,7 @@ class Plugin:
         self._spotify_auth_status: Dict[str, Any] = {"state": "idle", "message": ""}
         self._spotify_api_cache: Dict[str, Tuple[float, Any]] = {}
         self._spotify_cache_lock = threading.Lock()
+        self._spotify_api_cache_generation = 0
         self._spotify_cache_max_entries = 256
         self._spotify_disk_cache_dir = os.path.join(self.spotify_settings_dir, "spotify-api-cache")
         # Complete library metadata lives separately from the audio cache and
@@ -799,6 +799,8 @@ class Plugin:
         # explicit Spotify refresh/disconnect actions.
         self._spotify_library_cache_path = os.path.join(self.spotify_settings_dir, "spotify-library-cache.json")
         self._spotify_library_cache_lock = threading.RLock()
+        self._spotify_library_cache_memory: Optional[Dict[str, Any]] = None
+        self._spotify_library_cache_generation = 0
         self._spotify_playback_state_cache: Dict[str, Any] = {}
         self._spotify_playback_state_cache_at = 0.0
         self._spotify_playback_state_last_valid_at = 0.0
@@ -898,33 +900,48 @@ class Plugin:
     def _spotify_clear_api_cache(self) -> None:
         with self._spotify_cache_lock:
             self._spotify_api_cache.clear()
+            self._spotify_api_cache_generation += 1
 
     def _spotify_clear_disk_cache(self) -> None:
-        try:
-            if os.path.isdir(self._spotify_disk_cache_dir):
-                shutil.rmtree(self._spotify_disk_cache_dir, ignore_errors=True)
-        except Exception as exc:
-            self._log(f"Spotify disk cache cleanup error: {exc}")
+        with self._spotify_cache_lock:
+            try:
+                if os.path.isdir(self._spotify_disk_cache_dir):
+                    shutil.rmtree(self._spotify_disk_cache_dir, ignore_errors=True)
+            except Exception as exc:
+                self._log(f"Spotify disk cache cleanup error: {exc}")
 
     def _spotify_read_library_cache(self) -> Dict[str, Any]:
         with self._spotify_library_cache_lock:
+            if isinstance(self._spotify_library_cache_memory, dict):
+                return self._spotify_library_cache_memory
             try:
                 if os.path.isfile(self._spotify_library_cache_path):
                     with open(self._spotify_library_cache_path, "r", encoding="utf-8") as handle:
                         value = json.load(handle)
-                    return value if isinstance(value, dict) else {}
+                    self._spotify_library_cache_memory = value if isinstance(value, dict) else {}
+                    return self._spotify_library_cache_memory
             except Exception as exc:
                 self._log(f"Spotify library cache read error: {exc}")
-            return {}
+            self._spotify_library_cache_memory = {}
+            return self._spotify_library_cache_memory
 
-    def _spotify_write_library_cache(self, section: str, payload: Any, complete: bool) -> None:
+    def _spotify_write_library_cache(
+        self,
+        section: str,
+        payload: Any,
+        complete: bool,
+        expected_generation: Optional[int] = None,
+    ) -> None:
         with self._spotify_library_cache_lock:
+            if expected_generation is not None and expected_generation != self._spotify_library_cache_generation:
+                return
             cache = self._spotify_read_library_cache()
             cache[str(section)] = {
                 "complete": bool(complete),
                 "updated_at": time.time(),
                 "payload": payload,
             }
+            self._spotify_library_cache_memory = cache
             try:
                 os.makedirs(os.path.dirname(self._spotify_library_cache_path), exist_ok=True)
                 temporary = self._spotify_library_cache_path + f".{os.getpid()}.tmp"
@@ -936,6 +953,8 @@ class Plugin:
 
     def _spotify_clear_library_cache(self) -> None:
         with self._spotify_library_cache_lock:
+            self._spotify_library_cache_generation += 1
+            self._spotify_library_cache_memory = None
             try:
                 if os.path.isfile(self._spotify_library_cache_path):
                     os.remove(self._spotify_library_cache_path)
@@ -3739,13 +3758,19 @@ class Plugin:
                 self._spotify_control_override_until = 0.0
         return result
 
-    def _spotify_wait_for_bridge_playback_sync(self, timeout: float = 2.5) -> bool:
-        """Wait until an accepted librespot load is visible as active playback."""
+    def _spotify_wait_for_bridge_playback_sync(self, timeout: float = 4.5) -> bool:
+        """Wait for decoded audio to reach a live Windows output, not just Spirc state."""
         deadline = time.monotonic() + max(0.25, float(timeout))
         while time.monotonic() < deadline:
             try:
                 snapshot = self._spotify_playback_bridge_request_sync("/snapshot", 0.55)
-                if snapshot.get("ready") and snapshot.get("active"):
+                if (
+                    snapshot.get("ready")
+                    and snapshot.get("active")
+                    and str(snapshot.get("status") or "").strip().lower() == "playing"
+                    and snapshot.get("audioReady")
+                    and int(snapshot.get("audioPackets") or 0) > 0
+                ):
                     return True
             except Exception:
                 pass
@@ -6744,11 +6769,14 @@ class Plugin:
     def _spotify_cached_response(self, cache_key: str, max_age: Optional[float] = None) -> Any:
         cached: Optional[Tuple[float, Any]] = None
         with self._spotify_cache_lock:
+            generation = self._spotify_api_cache_generation
             cached = self._spotify_api_cache.get(cache_key)
         if cached is None:
             cached = self._spotify_read_disk_cache(cache_key)
             if cached is not None:
                 with self._spotify_cache_lock:
+                    if generation != self._spotify_api_cache_generation:
+                        return None
                     self._spotify_api_cache[cache_key] = cached
         if cached is None:
             return None
@@ -6756,15 +6784,32 @@ class Plugin:
             return None
         return cached[1]
 
-    def _spotify_store_cached_response(self, cache_key: str, result: Any) -> None:
+    def _spotify_store_cached_response(
+        self,
+        cache_key: str,
+        result: Any,
+        expected_generation: Optional[int] = None,
+    ) -> None:
         now = time.time()
         with self._spotify_cache_lock:
+            if expected_generation is not None and expected_generation != self._spotify_api_cache_generation:
+                return
             self._spotify_api_cache[cache_key] = (now, result)
             if len(self._spotify_api_cache) > self._spotify_cache_max_entries:
                 oldest = sorted(self._spotify_api_cache.items(), key=lambda entry: entry[1][0])
                 for stale_key, _ in oldest[: len(self._spotify_api_cache) - self._spotify_cache_max_entries]:
                     self._spotify_api_cache.pop(stale_key, None)
-        self._spotify_write_disk_cache(cache_key, result)
+            self._spotify_write_disk_cache(cache_key, result)
+
+    def _spotify_remove_cached_response(self, cache_key: str) -> None:
+        with self._spotify_cache_lock:
+            self._spotify_api_cache.pop(cache_key, None)
+            try:
+                path = self._spotify_disk_cache_path(cache_key)
+                if os.path.isfile(path):
+                    os.remove(path)
+            except Exception as exc:
+                self._log(f"Spotify disk cache invalidation error: {exc}")
 
     @staticmethod
     def _spotify_scraper_id(value: Any) -> str:
@@ -6945,13 +6990,16 @@ class Plugin:
             if fresh is not None:
                 return fresh
 
+        with self._spotify_cache_lock:
+            request_cache_generation = self._spotify_api_cache_generation
+
         if method == "GET":
             try:
                 scraper_result = self._spotify_scraper_api_sync(path, params)
                 if scraper_result is not None:
                     self._spotify_scraper_hits += 1
                     self._spotify_scraper_last_error = ""
-                    self._spotify_store_cached_response(cache_key, scraper_result)
+                    self._spotify_store_cached_response(cache_key, scraper_result, request_cache_generation)
                     self._record_diagnostic_event("spotify", "scraper_hit", {"path": path, "hits": self._spotify_scraper_hits})
                     return scraper_result
             except Exception as exc:
@@ -6978,6 +7026,16 @@ class Plugin:
         if body is not None:
             encoded_body = json.dumps(body).encode("utf-8")
 
+        token = self._spotify_access_token(False)
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=encoded_body, method=method, headers=headers)
+
+        # Serialize only dispatch pacing, not the entire network round trip. Home
+        # deliberately requests independent shelves in parallel; holding this lock
+        # through urlopen made three requests take the sum of their latencies. Each
+        # outbound call is still spaced by the configured interval.
         with self._spotify_request_lock:
             status = self._spotify_rate_limit_status_sync()
             if status.get("active"):
@@ -6989,58 +7047,53 @@ class Plugin:
             delay = self._spotify_min_request_interval - (time.monotonic() - self._spotify_last_request_at)
             if delay > 0:
                 time.sleep(delay)
-            token = self._spotify_access_token(False)
-            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-            if body is not None:
-                headers["Content-Type"] = "application/json"
-            request = urllib.request.Request(url, data=encoded_body, method=method, headers=headers)
+            self._spotify_last_request_at = time.monotonic()
             now_call = time.time()
             self._spotify_api_call_total += 1
             self._spotify_api_call_times.append(now_call)
             if len(self._spotify_api_call_times) > 600:
                 self._spotify_api_call_times = [t for t in self._spotify_api_call_times if now_call - t <= 60.0]
+
+        try:
+            with urllib.request.urlopen(request, timeout=12.0) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                stripped = raw.strip()
+                if response.status == 204 or not stripped:
+                    result: Any = {"ok": True}
+                else:
+                    try:
+                        result = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        if method in {"PUT", "POST", "DELETE"}:
+                            result = {"ok": True}
+                        else:
+                            raise RuntimeError("Spotify returned an invalid response")
+                if method == "GET":
+                    self._spotify_store_cached_response(cache_key, result, request_cache_generation)
+                return result
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and retry_auth:
+                self._spotify_access_token(True)
+                return self._spotify_api_sync(path, method, params, body, cache_seconds, False)
+            raw = exc.read().decode("utf-8", errors="replace")
             try:
-                with urllib.request.urlopen(request, timeout=12.0) as response:
-                    self._spotify_last_request_at = time.monotonic()
-                    raw = response.read().decode("utf-8", errors="replace")
-                    stripped = raw.strip()
-                    if response.status == 204 or not stripped:
-                        result: Any = {"ok": True}
-                    else:
-                        try:
-                            result = json.loads(stripped)
-                        except json.JSONDecodeError:
-                            if method in {"PUT", "POST", "DELETE"}:
-                                result = {"ok": True}
-                            else:
-                                raise RuntimeError("Spotify returned an invalid response")
-                    if method == "GET":
-                        self._spotify_store_cached_response(cache_key, result)
-                    return result
-            except urllib.error.HTTPError as exc:
-                self._spotify_last_request_at = time.monotonic()
-                if exc.code == 401 and retry_auth:
-                    self._spotify_access_token(True)
-                    return self._spotify_api_sync(path, method, params, body, cache_seconds, False)
-                raw = exc.read().decode("utf-8", errors="replace")
-                try:
-                    detail = json.loads(raw)
-                except Exception:
-                    detail = raw or exc.reason
-                if exc.code == 429:
-                    rate_error = self._spotify_set_rate_limit(exc.headers.get("Retry-After", 60))
-                    if method == "GET":
-                        stale = self._spotify_cached_response(cache_key, None)
-                        if stale is not None:
-                            return stale
-                    raise rate_error from exc
-                if exc.code == 403:
-                    raise RuntimeError("Spotify denied this action. Premium or an additional permission may be required") from exc
-                if exc.code == 404:
-                    raise RuntimeError("Spotify could not find an active playback device") from exc
-                raise RuntimeError(f"Spotify API error {exc.code}: {detail}") from exc
-            except urllib.error.URLError as exc:
-                raise RuntimeError(f"Unable to reach Spotify: {exc.reason}") from exc
+                detail = json.loads(raw)
+            except Exception:
+                detail = raw or exc.reason
+            if exc.code == 429:
+                rate_error = self._spotify_set_rate_limit(exc.headers.get("Retry-After", 60))
+                if method == "GET":
+                    stale = self._spotify_cached_response(cache_key, None)
+                    if stale is not None:
+                        return stale
+                raise rate_error from exc
+            if exc.code == 403:
+                raise RuntimeError("Spotify denied this action. Premium or an additional permission may be required") from exc
+            if exc.code == 404:
+                raise RuntimeError("Spotify could not find an active playback device") from exc
+            raise RuntimeError(f"Spotify API error {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Unable to reach Spotify: {exc.reason}") from exc
 
     def _spotify_require_ready(self) -> None:
         if not self.spotify_settings.get("refresh_token") and not self.spotify_settings.get("access_token"):
@@ -7266,6 +7319,8 @@ class Plugin:
         kept.insert(0, {"uri": normalized_uri, "played_at": time.time()})
         self.spotify_settings["recent_playlists"] = kept[:100]
         self._save_spotify_settings()
+        self._spotify_clear_api_cache()
+        self._spotify_remove_cached_response("NOW_PLAYING:SPOTIFY_HOME:2")
 
     def _spotify_recent_saved_playlists(self, saved_playlists: Dict[str, Any], max_items: int = 20) -> Dict[str, Any]:
         requested = max(1, min(20, int(max_items or 20)))
@@ -7452,6 +7507,12 @@ class Plugin:
     async def spotify_get_home(self) -> Dict[str, Any]:
         def work() -> Dict[str, Any]:
             self._spotify_require_ready()
+            aggregate_cache_key = "NOW_PLAYING:SPOTIFY_HOME:2"
+            cached_home = self._spotify_cached_response(aggregate_cache_key, 1800)
+            if isinstance(cached_home, dict):
+                return cached_home
+            with self._spotify_cache_lock:
+                home_cache_generation = self._spotify_api_cache_generation
             with ThreadPoolExecutor(max_workers=3, thread_name_prefix="NowPlaying-SpotifyHome") as pool:
                 profile_future = pool.submit(self._spotify_api_sync, "/me", "GET", None, None, 21600)
                 playlists_future = pool.submit(self._spotify_collect_offset_pages, "/me/playlists", None, 100, 21600, "")
@@ -7459,12 +7520,14 @@ class Plugin:
                 saved_playlists = playlists_future.result()
                 profile = profile_future.result()
                 display_name = str((profile or {}).get("display_name") or (profile or {}).get("id") or "") if isinstance(profile, dict) else ""
-                return {
+                result = {
                     "profile": profile,
                     "playlists": self._spotify_recent_saved_playlists(saved_playlists, 20),
                     "newForYou": {"items": releases_future.result()},
                     "displayName": display_name,
                 }
+                self._spotify_store_cached_response(aggregate_cache_key, result, home_cache_generation)
+                return result
         try:
             return {"ok": True, "data": await self._run_in_executor(self._spotify_executor, work)}
         except Exception as exc:
@@ -7507,6 +7570,29 @@ class Plugin:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    @staticmethod
+    def _spotify_library_page(payload: Dict[str, Any], section: str, offset: int, limit: int) -> Dict[str, Any]:
+        """Return a shallow cached page without cloning a multi-megabyte library."""
+        root = dict(payload)
+        source = payload.get("artists") if section == "artists" else payload
+        if not isinstance(source, dict):
+            return root
+        container = dict(source)
+        all_items = source.get("items") if isinstance(source.get("items"), list) else []
+        start = max(0, int(offset or 0))
+        count = max(1, int(limit or 1))
+        total = max(len(all_items), int(source.get("total") or 0))
+        container["items"] = all_items[start:start + count]
+        container["offset"] = start
+        container["limit"] = len(container["items"])
+        container["total"] = total
+        container["next"] = "cached" if start + len(container["items"]) < total else None
+        container["previous"] = "cached" if start > 0 else None
+        if section == "artists":
+            root["artists"] = container
+            return root
+        return container
+
     async def spotify_get_library(self, section: str, offset: int = 0, max_items: int = 300) -> Dict[str, Any]:
         section = str(section or "tracks")
         if section not in {"tracks", "albums", "playlists", "artists"}:
@@ -7519,20 +7605,27 @@ class Plugin:
 
         def work() -> Any:
             self._spotify_require_ready()
-            cached_sections = self._spotify_read_library_cache()
+            with self._spotify_library_cache_lock:
+                library_cache_generation = self._spotify_library_cache_generation
+                cached_sections = self._spotify_read_library_cache()
             cached_entry = cached_sections.get(section) if isinstance(cached_sections, dict) else None
             if isinstance(cached_entry, dict) and isinstance(cached_entry.get("payload"), dict):
-                cached_payload = copy.deepcopy(cached_entry.get("payload"))
+                cached_payload = cached_entry.get("payload")
                 cached_complete = bool(cached_entry.get("complete"))
                 if unlimited_private_section and cached_complete:
                     return cached_payload
                 if not unlimited_private_section:
-                    key = "artists" if section == "artists" else "items"
                     container = cached_payload.get("artists") if section == "artists" else cached_payload
                     if isinstance(container, dict) and isinstance(container.get("items"), list):
-                        container["items"] = container["items"][:requested_items]
-                        container["limit"] = len(container["items"])
-                        return cached_payload
+                        available = len(container["items"])
+                        requested_offset = max(0, int(offset or 0))
+                        if cached_complete or available >= requested_offset + requested_items:
+                            return self._spotify_library_page(
+                                cached_payload,
+                                section,
+                                requested_offset,
+                                requested_items,
+                            )
             if section == "artists":
                 payload = self._spotify_collect_followed_artists(requested_items, 21600)
                 artists = payload.get("artists", {}) if isinstance(payload, dict) else {}
@@ -7541,7 +7634,12 @@ class Plugin:
                         artists.get("items", []) if isinstance(artists.get("items"), list) else [],
                         key=lambda item: self._spotify_alpha_key(item.get("name", "")) if isinstance(item, dict) else "",
                     )
-                self._spotify_write_library_cache(section, payload, unlimited_private_section)
+                self._spotify_write_library_cache(
+                    section,
+                    payload,
+                    unlimited_private_section,
+                    library_cache_generation,
+                )
                 return payload
             path = {
                 "tracks": "/me/tracks",
@@ -7560,7 +7658,12 @@ class Plugin:
                     key=lambda entry: self._spotify_alpha_key((entry.get("album") or {}).get("name", ""))
                     if isinstance(entry, dict) and isinstance(entry.get("album"), dict) else "",
                 )
-            self._spotify_write_library_cache(section, payload, unlimited_private_section)
+            self._spotify_write_library_cache(
+                section,
+                payload,
+                unlimited_private_section,
+                library_cache_generation,
+            )
             return payload
 
         try:
@@ -8032,7 +8135,7 @@ class Plugin:
         session = connection = request = None
         try:
             session = winhttp.WinHttpOpen(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.4.0",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NowPlaying/2.5.0",
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 None,
                 None,
@@ -8223,7 +8326,7 @@ class Plugin:
         params = {"query": f'artist:"{name}"', "fmt": "json", "limit": max(8, min(25, int(limit) * 3))}
         request = urllib.request.Request(
             "https://musicbrainz.org/ws/2/artist/?" + urllib.parse.urlencode(params),
-            headers={"User-Agent": "NowPlayingDecky/2.4.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
+            headers={"User-Agent": "NowPlayingDecky/2.5.0 (https://github.com/LoZazaMastro)", "Accept": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -8277,7 +8380,7 @@ class Plugin:
                 url = f"https://webservice.fanart.tv/{version}/music/{urllib.parse.quote(clean_mbid, safe='')}?" + urllib.parse.urlencode({"api_key": api_key})
                 request = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "NowPlayingDecky/2.4.0", "Accept": "application/json"},
+                    headers={"User-Agent": "NowPlayingDecky/2.5.0", "Accept": "application/json"},
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -8325,7 +8428,7 @@ class Plugin:
             url = "https://www.theaudiodb.com/api/v1/json/2/search.php?" + urllib.parse.urlencode({"s": name})
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "NowPlayingDecky/2.4.0", "Accept": "application/json"},
+                headers={"User-Agent": "NowPlayingDecky/2.5.0", "Accept": "application/json"},
             )
             try:
                 with urllib.request.urlopen(request, timeout=8) as response:
@@ -9751,7 +9854,7 @@ class Plugin:
         now_mono = time.monotonic()
         report = {
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "pluginVersion": "2.4.0",
+            "pluginVersion": "2.5.0",
             "python": sys.version,
             "platform": platform.platform(),
             "backend": {
@@ -9865,7 +9968,7 @@ class Plugin:
         operation_durations["totalBeforeWrite"] = round((time.monotonic() - diagnostic_started) * 1000, 1)
         runtime_logs = self._read_runtime_logs_for_diagnostics()
         content = (
-            "NOW PLAYING 2.4.0 DIAGNOSTICS\n"
+            "NOW PLAYING 2.5.0 DIAGNOSTICS\n"
             + json.dumps(report, ensure_ascii=False, indent=2)
             + "\n\nSTRUCTURED EVENTS (oldest to newest)\n"
             + "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in structured_events)
@@ -10090,7 +10193,7 @@ class Plugin:
         try:
             request = urllib.request.Request(
                 f"http://127.0.0.1:{TOPBAR_CEF_PORT}/json/list",
-                headers={"User-Agent": "Decky Now Playing/2.4.0"},
+                headers={"User-Agent": "Decky Now Playing/2.5.0"},
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 targets = json.loads(response.read().decode("utf-8"))

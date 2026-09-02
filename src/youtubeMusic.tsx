@@ -94,6 +94,42 @@ function libraryItems(payload: any, section: LibrarySection): any[] {
   return Array.isArray(value) ? value : [];
 }
 
+const youtubeMusicLibrarySessionCache = new Map<LibrarySection, any>();
+const youtubeMusicLibraryHydrations = new Map<LibrarySection, Promise<any | null>>();
+let youtubeMusicLibraryCacheRevision = 0;
+
+function youtubeMusicLibraryNeedsHydration(payload: any, section: LibrarySection): boolean {
+  const container = section === "artists" ? payload?.artists : payload;
+  const items = libraryItems(payload, section);
+  const total = Math.max(0, Number(container?.total ?? items.length));
+  return Boolean(container?.next) || total > items.length || items.length >= 120;
+}
+
+function hydrateYouTubeMusicLibrary(section: LibrarySection, onReady: (value: any) => void) {
+  const revision = youtubeMusicLibraryCacheRevision;
+  let request = youtubeMusicLibraryHydrations.get(section);
+  if (!request) {
+    request = python.youtubeMusicGetLibrary(section, 0)
+      .then((result) => result?.ok ? (result.data ?? null) : null)
+      .catch(() => null);
+    youtubeMusicLibraryHydrations.set(section, request);
+    void request.finally(() => {
+      if (youtubeMusicLibraryHydrations.get(section) === request) youtubeMusicLibraryHydrations.delete(section);
+    });
+  }
+  void request.then((value) => {
+    if (!value || revision !== youtubeMusicLibraryCacheRevision) return;
+    youtubeMusicLibrarySessionCache.set(section, value);
+    onReady(value);
+  });
+}
+
+function clearYouTubeMusicLibrarySessionCache() {
+  youtubeMusicLibraryCacheRevision += 1;
+  youtubeMusicLibrarySessionCache.clear();
+  youtubeMusicLibraryHydrations.clear();
+}
+
 function shuffledCopy<T>(items: T[]): T[] {
   const result = [...items];
   for (let index = result.length - 1; index > 0; index -= 1) {
@@ -181,6 +217,7 @@ export function YouTubeMusicSettingsPanel({ selectedService = "youtubeMusic" }: 
           setAuthRunning(false);
           setBusy(false);
           if (status.phase === "connected" && status.settings) {
+            clearYouTubeMusicLibrarySessionCache();
             setSettings(status.settings);
             toaster.toast({ title: "YouTube Music", body: t.connected, duration: 2400 });
           } else if (status.error) {
@@ -316,12 +353,12 @@ export function YouTubeMusicSettingsPanel({ selectedService = "youtubeMusic" }: 
         {showManualAuth ? <div style={{ marginTop: "9px" }}>
           <p style={{ fontSize: ".72em", lineHeight: 1.42, opacity: .72, margin: "0 0 7px" }}>{t.browserHeadersDescription}</p>
           <TextField value={headers} label={t.browserHeaders} onChange={(value: any) => setHeaders(typeof value === "string" ? value : String(value?.target?.value ?? ""))} />
-          <DialogButton style={{ ...fullButton, marginTop: "7px" }} disabled={busy || !headers.trim()} onClick={() => void run(() => python.connectYouTubeMusic(headers), t.connected)}><span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center" }}>{t.connect}</span></DialogButton>
+          <DialogButton style={{ ...fullButton, marginTop: "7px" }} disabled={busy || !headers.trim()} onClick={() => void run(async () => { const result = await python.connectYouTubeMusic(headers); if (result.ok) clearYouTubeMusicLibrarySessionCache(); return result; }, t.connected)}><span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center" }}>{t.connect}</span></DialogButton>
         </div> : null}
-      </> : <DialogButton style={{ ...fullButton, marginTop: "7px" }} disabled={busy} onClick={() => void run(() => python.disconnectYouTubeMusic(), t.disconnect)}><span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", textAlign: "center" }}><FaSignOutAlt />{t.disconnect}</span></DialogButton>}
+      </> : <DialogButton style={{ ...fullButton, marginTop: "7px" }} disabled={busy} onClick={() => void run(async () => { const result = await python.disconnectYouTubeMusic(); if (result.ok) clearYouTubeMusicLibrarySessionCache(); return result; }, t.disconnect)}><span style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", textAlign: "center" }}><FaSignOutAlt />{t.disconnect}</span></DialogButton>}
       <div style={{ marginTop: "12px", fontSize: ".76em", fontWeight: 700, opacity: .72 }}>{t.audioQuality}</div>
       {(["low", "medium", "high"] as const).map((quality) => <DialogButton key={quality} style={{ ...fullButton, marginTop: "6px", border: settings.audioQuality === quality ? `1px solid ${YOUTUBE_RED}` : undefined }} disabled={busy} onClick={() => void run(() => python.setYouTubeMusicAudioQuality(quality))}><span style={{ width: "100%", padding: "0 10px", boxSizing: "border-box", display: "flex", justifyContent: "space-between" }}><span>{{ low: t.qualityLow, medium: t.qualityMedium, high: t.qualityHigh }[quality]}</span>{settings.audioQuality === quality ? <span style={{ color: YOUTUBE_RED }}>{"\u25cf"}</span> : null}</span></DialogButton>)}
-      <DialogButton style={{ ...fullButton, marginTop: "10px" }} onClick={() => void python.refreshYouTubeMusicCache().then((result) => { if (!result.ok) throw new Error(result.error); toaster.toast({ title: "YouTube Music", body: t.refresh, duration: 2000 }); }).catch(notifyError)}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}><FaSyncAlt />{t.refresh}</span></DialogButton>
+      <DialogButton style={{ ...fullButton, marginTop: "10px" }} onClick={() => void python.refreshYouTubeMusicCache().then((result) => { if (!result.ok) throw new Error(result.error); clearYouTubeMusicLibrarySessionCache(); toaster.toast({ title: "YouTube Music", body: t.refresh, duration: 2000 }); }).catch(notifyError)}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}><FaSyncAlt />{t.refresh}</span></DialogButton>
       <div style={{ marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
         <div style={{ fontSize: "0.8em", fontWeight: 700, marginBottom: "5px" }}>{st.artistCacheTitle}</div>
         <p style={{ margin: "0 2px 9px", fontSize: "0.72em", lineHeight: 1.42, opacity: 0.56 }}>{t.artistCacheDescription}</p>
@@ -356,6 +393,7 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }: BrowserProps) {
   const [searchResults, setSearchResults] = useState<any>(null);
   const [query, setQuery] = useState("");
   const [librarySection, setLibrarySection] = useState<LibrarySection>("tracks");
+  const librarySectionRef = useRef<LibrarySection>("tracks");
   const [library, setLibrary] = useState<any>(null);
   const [detail, setDetail] = useState<DetailState>(null);
   const [loading, setLoading] = useState(false);
@@ -378,6 +416,31 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }: BrowserProps) {
 
   const loadHome = useCallback(() => { void run(python.youtubeMusicGetHome, setHome); }, [run]);
   useEffect(() => { if (!home) loadHome(); }, [home, loadHome]);
+
+  const loadLibrary = useCallback((section: LibrarySection) => {
+    librarySectionRef.current = section;
+    setLibrarySection(section);
+    const cached = youtubeMusicLibrarySessionCache.get(section);
+    if (cached) {
+      setLibrary(cached);
+      setLoading(false);
+      if (youtubeMusicLibraryNeedsHydration(cached, section)) {
+        hydrateYouTubeMusicLibrary(section, (complete) => {
+          if (librarySectionRef.current === section) setLibrary(complete);
+        });
+      }
+      return;
+    }
+    void run(() => python.youtubeMusicGetLibrary(section, 120), (value) => {
+      youtubeMusicLibrarySessionCache.set(section, value);
+      setLibrary(value);
+      if (youtubeMusicLibraryNeedsHydration(value, section)) {
+        hydrateYouTubeMusicLibrary(section, (complete) => {
+          if (librarySectionRef.current === section) setLibrary(complete);
+        });
+      }
+    });
+  }, [run]);
 
   const openDetail = (item: any) => {
     const kind = itemType(item);
@@ -415,7 +478,7 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }: BrowserProps) {
     </>;
   };
 
-  const tabButton = (key: BrowserTab, label: string, icon: React.ReactNode) => <DialogButton style={{ flex: 1, minWidth: 0, height: "32px", minHeight: "32px", padding: 0, opacity: tab === key ? 1 : .58 }} onClick={() => { requestSerial.current += 1; setLoading(false); setDetail(null); setTab(key); if (key === "home" && !home) loadHome(); if (key === "library" && !library) void run(() => python.youtubeMusicGetLibrary(librarySection, 0), setLibrary); }}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "5px", fontSize: ".72em" }}>{icon}{label}</span></DialogButton>;
+  const tabButton = (key: BrowserTab, label: string, icon: React.ReactNode) => <DialogButton style={{ flex: 1, minWidth: 0, height: "32px", minHeight: "32px", padding: 0, opacity: tab === key ? 1 : .58 }} onClick={() => { requestSerial.current += 1; setLoading(false); setDetail(null); setTab(key); if (key === "home" && !home) loadHome(); if (key === "library" && !library) loadLibrary(librarySection); }}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "5px", fontSize: ".72em" }}>{icon}{label}</span></DialogButton>;
 
   const renderHome = () => <>
     <div style={sectionLabel}>{t.yourPlaylists}</div>{renderRows(home?.playlists?.items ?? [])}
@@ -437,7 +500,7 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }: BrowserProps) {
     const items = libraryItems(library, librarySection);
     return <>
       <div style={{ height: "8px" }} />
-      <Focusable flow-children="grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", width: "100%" }}>{(["tracks", "albums", "playlists", "artists"] as LibrarySection[]).map((section) => <DialogButton key={section} style={{ ...fullButton, minWidth: 0, opacity: librarySection === section ? 1 : .58 }} onClick={() => { setLibrarySection(section); void run(() => python.youtubeMusicGetLibrary(section, 0), setLibrary); }}><span style={{ fontSize: ".74em", textTransform: "capitalize" }}>{String((t as any)[section])}</span></DialogButton>)}</Focusable>
+      <Focusable flow-children="grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", width: "100%" }}>{(["tracks", "albums", "playlists", "artists"] as LibrarySection[]).map((section) => <DialogButton key={section} style={{ ...fullButton, minWidth: 0, opacity: librarySection === section ? 1 : .58 }} onClick={() => loadLibrary(section)}><span style={{ fontSize: ".74em", textTransform: "capitalize" }}>{String((t as any)[section])}</span></DialogButton>)}</Focusable>
       <div style={sectionLabel}>{String((t as any)[librarySection])}</div>
       {librarySection === "tracks" && items.length ? <Focusable flow-children="horizontal" style={{ display: "flex", gap: "6px", marginBottom: "7px" }}><DialogButton style={{ ...fullButton, flex: 1, minWidth: 0, background: YOUTUBE_RED }} onClick={() => void playItems(items)}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 800, fontSize: ".8em" }}><FaPlay />{t.play}</span></DialogButton><DialogButton style={{ ...fullButton, flex: 1, minWidth: 0 }} onClick={() => void playItems(shuffledCopy(items))}><span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 700, fontSize: ".8em" }}><FaRandom />{t.shuffle}</span></DialogButton></Focusable> : null}
       {renderRows(items, librarySection === "tracks")}
@@ -467,6 +530,7 @@ export function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSetting
   const [searchResults, setSearchResults] = useState<any>(null);
   const [query, setQuery] = useState("");
   const [librarySection, setLibrarySection] = useState<LibrarySection>("tracks");
+  const librarySectionRef = useRef<LibrarySection>("tracks");
   const [library, setLibrary] = useState<any>(null);
   const [detail, setDetail] = useState<DetailState>(null);
   const [artistHero, setArtistHero] = useState("");
@@ -502,6 +566,32 @@ export function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSetting
 
   const loadHome = useCallback(() => { void run(python.youtubeMusicGetHome, setHome); }, [run]);
   useEffect(() => { if (!home) loadHome(); }, [home, loadHome]);
+
+  const loadLibrary = useCallback((section: LibrarySection) => {
+    librarySectionRef.current = section;
+    setLibrarySection(section);
+    setLibraryTrackVisibleCount(120);
+    const cached = youtubeMusicLibrarySessionCache.get(section);
+    if (cached) {
+      setLibrary(cached);
+      setLoading(false);
+      if (youtubeMusicLibraryNeedsHydration(cached, section)) {
+        hydrateYouTubeMusicLibrary(section, (complete) => {
+          if (librarySectionRef.current === section) setLibrary(complete);
+        });
+      }
+      return;
+    }
+    void run(() => python.youtubeMusicGetLibrary(section, 120), (value) => {
+      youtubeMusicLibrarySessionCache.set(section, value);
+      setLibrary(value);
+      if (youtubeMusicLibraryNeedsHydration(value, section)) {
+        hydrateYouTubeMusicLibrary(section, (complete) => {
+          if (librarySectionRef.current === section) setLibrary(complete);
+        });
+      }
+    });
+  }, [run]);
   // Focus the Home tab on entry so the user never lands on the search bar or
   // elements hidden behind the Big Picture overlay.
   useEffect(() => {
@@ -570,7 +660,7 @@ export function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSetting
     setTab(next);
     scrollRef.current?.scrollTo?.({ top: 0 });
     if (next === "home" && !home) loadHome();
-    if (next === "library" && !library) void run(() => python.youtubeMusicGetLibrary(librarySection, 0), setLibrary);
+    if (next === "library" && !library) loadLibrary(librarySection);
   };
 
   const openDetail = (item: any) => {
@@ -604,9 +694,7 @@ export function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSetting
     const items = libraryItems(library, librarySection);
     const visibleItems = librarySection === "tracks" ? items.slice(0, libraryTrackVisibleCount) : items;
     const loadSection = (section: LibrarySection) => {
-      setLibrarySection(section);
-      setLibraryTrackVisibleCount(120);
-      void run(() => python.youtubeMusicGetLibrary(section, 0), setLibrary);
+      loadLibrary(section);
     };
     return <>
       <Focusable flow-children="horizontal" style={{ display: "flex", gap: "9px", marginTop: "4px" }}>

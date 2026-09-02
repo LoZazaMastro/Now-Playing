@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -12,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -30,12 +32,15 @@ class YouTubeMusicService:
         self.vendor_dir = vendor_dir
         self.settings_path = os.path.join(settings_dir, "youtube-music.json")
         self.library_cache_path = os.path.join(settings_dir, "youtube-music-library-cache.json")
+        self.response_cache_dir = os.path.join(settings_dir, "youtube-music-response-cache")
         self.browser_profile_dir = os.path.join(settings_dir, "youtube-music-browser-profile")
         self._logger = logger
         self._lock = threading.RLock()
         self._client: Any = None
         self._client_signature = ""
         self._cache: Dict[str, Tuple[float, Any]] = {}
+        self._cache_generation = 0
+        self._library_cache_memory: Optional[Dict[str, Any]] = None
         self._stream_cache: Dict[str, Dict[str, Any]] = {}
         self._stream_inflight: Dict[str, threading.Event] = {}
         self._browser_launcher = browser_launcher
@@ -471,6 +476,15 @@ class YouTubeMusicService:
                 self._client_signature = signature
             return self._client
 
+    def _independent_client_for_request(self, authenticated: Optional[bool] = None):
+        """Create a request-local client for safe parallel browse/search calls."""
+        self._ensure_imports()
+        from ytmusicapi import YTMusic
+
+        auth = self.settings.get("auth") if isinstance(self.settings.get("auth"), dict) else {}
+        use_auth = bool(auth) if authenticated is None else bool(auth) and authenticated
+        return YTMusic(dict(auth) if use_auth else None, language="en", location="IT")
+
 
     def _is_oauth(self) -> bool:
         return bool(self.settings.get("oauth"))
@@ -513,7 +527,7 @@ class YouTubeMusicService:
             self._client_signature = ""
             profile = self._client_for_request(True).get_account_info()
             self.settings["profile"] = profile if isinstance(profile, dict) else {}
-            self._cache.clear()
+            self.clear_cache()
             self._save_settings()
         return self.public_settings()
 
@@ -524,8 +538,7 @@ class YouTubeMusicService:
             self.settings["profile"] = {}
             self._client = None
             self._client_signature = ""
-            self._cache.clear()
-            self._stream_cache.clear()
+            self.clear_cache()
             self._save_settings()
         try:
             if os.path.isdir(self.browser_profile_dir):
@@ -553,55 +566,118 @@ class YouTubeMusicService:
     def clear_cache(self) -> Dict[str, int]:
         with self._lock:
             entries = len(self._cache) + len(self._stream_cache)
+            self._cache_generation += 1
             self._cache.clear()
             self._stream_cache.clear()
+            self._library_cache_memory = None
             try:
                 if os.path.isfile(self.library_cache_path):
                     os.remove(self.library_cache_path)
                     entries += 1
             except Exception as exc:
                 self._log(f"YouTube Music library cache cleanup error: {exc}")
+            try:
+                if os.path.isdir(self.response_cache_dir):
+                    entries += len(os.listdir(self.response_cache_dir))
+                    shutil.rmtree(self.response_cache_dir, ignore_errors=True)
+            except Exception as exc:
+                self._log(f"YouTube Music response cache cleanup error: {exc}")
         return {"entries": entries}
 
     def _read_library_cache(self) -> Dict[str, Any]:
-        try:
-            if os.path.isfile(self.library_cache_path):
-                with open(self.library_cache_path, "r", encoding="utf-8") as handle:
-                    value = json.load(handle)
-                return value if isinstance(value, dict) else {}
-        except Exception as exc:
-            self._log(f"YouTube Music library cache read error: {exc}")
-        return {}
+        with self._lock:
+            if isinstance(self._library_cache_memory, dict):
+                return self._library_cache_memory
+            try:
+                if os.path.isfile(self.library_cache_path):
+                    with open(self.library_cache_path, "r", encoding="utf-8") as handle:
+                        value = json.load(handle)
+                    self._library_cache_memory = value if isinstance(value, dict) else {}
+                    return self._library_cache_memory
+            except Exception as exc:
+                self._log(f"YouTube Music library cache read error: {exc}")
+            self._library_cache_memory = {}
+            return self._library_cache_memory
 
-    def _write_library_cache(self, section: str, payload: Dict[str, Any], complete: bool) -> None:
+    def _write_library_cache(
+        self,
+        section: str,
+        payload: Dict[str, Any],
+        complete: bool,
+        expected_generation: Optional[int] = None,
+    ) -> None:
+        with self._lock:
+            if expected_generation is not None and expected_generation != self._cache_generation:
+                return
+            try:
+                cache = self._read_library_cache()
+                cache[str(section)] = {
+                    "complete": bool(complete),
+                    "updatedAt": time.time(),
+                    "payload": payload,
+                }
+                self._library_cache_memory = cache
+                os.makedirs(os.path.dirname(self.library_cache_path), exist_ok=True)
+                temporary = self.library_cache_path + f".{os.getpid()}.tmp"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(cache, handle, ensure_ascii=False, separators=(",", ":"))
+                os.replace(temporary, self.library_cache_path)
+            except Exception as exc:
+                self._log(f"YouTube Music library cache write error: {exc}")
+
+    def _response_cache_path(self, key: str) -> str:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return os.path.join(self.response_cache_dir, digest + ".json")
+
+    def _read_response_cache(self, key: str, ttl: float) -> Any:
         try:
-            cache = self._read_library_cache()
-            cache[str(section)] = {
-                "complete": bool(complete),
-                "updatedAt": time.time(),
-                "payload": payload,
-            }
-            os.makedirs(os.path.dirname(self.library_cache_path), exist_ok=True)
-            temporary = self.library_cache_path + f".{os.getpid()}.tmp"
+            path = self._response_cache_path(key)
+            if not os.path.isfile(path):
+                return None
+            with open(path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            if not isinstance(value, dict) or value.get("key") != key:
+                return None
+            if time.time() - float(value.get("storedAt") or 0.0) > max(0.0, float(ttl)):
+                return None
+            return value.get("data")
+        except Exception:
+            return None
+
+    def _write_response_cache(self, key: str, value: Any) -> None:
+        try:
+            os.makedirs(self.response_cache_dir, exist_ok=True)
+            path = self._response_cache_path(key)
+            temporary = path + f".{os.getpid()}.tmp"
             with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump(cache, handle, ensure_ascii=False, separators=(",", ":"))
-            os.replace(temporary, self.library_cache_path)
+                json.dump({"key": key, "storedAt": time.time(), "data": value}, handle, ensure_ascii=False, separators=(",", ":"))
+            os.replace(temporary, path)
         except Exception as exc:
-            self._log(f"YouTube Music library cache write error: {exc}")
+            self._log(f"YouTube Music response cache write error: {exc}")
 
     def _cached(self, key: str, ttl: float, producer):
         now = time.monotonic()
         with self._lock:
+            generation = self._cache_generation
             cached = self._cache.get(key)
             if cached and now - cached[0] <= ttl:
                 return cached[1]
+        disk_value = self._read_response_cache(key, ttl)
+        if disk_value is not None:
+            with self._lock:
+                if generation == self._cache_generation:
+                    self._cache[key] = (now, disk_value)
+                    return disk_value
         value = producer()
         with self._lock:
+            if generation != self._cache_generation:
+                return value
             if len(self._cache) >= 180:
                 oldest = sorted(self._cache.items(), key=lambda item: item[1][0])[:40]
                 for cache_key, _ in oldest:
                     self._cache.pop(cache_key, None)
             self._cache[key] = (now, value)
+            self._write_response_cache(key, value)
         return value
 
     @staticmethod
@@ -770,11 +846,39 @@ class YouTubeMusicService:
             return []
 
     def get_home(self) -> Dict[str, Any]:
-        client = self._client_for_request()
-
         def produce() -> Dict[str, Any]:
-            with self._request_context(client):
-                shelves = client.get_home(limit=8)
+            client = self._client_for_request()
+
+            def fetch_shelves() -> Any:
+                with self._request_context(client):
+                    return client.get_home(limit=8)
+
+            def fetch_playlists() -> List[Dict[str, Any]]:
+                if not self._has_auth():
+                    return []
+                request_client = self._independent_client_for_request(True)
+                try:
+                    with self._request_context(request_client):
+                        values = request_client.get_library_playlists(limit=30)
+                    return self._normalize_many(values, "playlist")
+                except Exception as exc:
+                    self._log(f"YouTube Music playlists unavailable: {exc}")
+                    return []
+
+            def fetch_releases() -> List[Dict[str, Any]]:
+                request_client = self._independent_client_for_request()
+                return self._collect_new_releases(request_client)
+
+            # These endpoints are independent. Separate clients avoid ytmusicapi's
+            # non-thread-safe mobile context while cutting cold Home latency from
+            # three network round trips in series to one parallel batch.
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="NowPlaying-YTM-Home") as pool:
+                shelves_future = pool.submit(fetch_shelves)
+                playlists_future = pool.submit(fetch_playlists)
+                releases_future = pool.submit(fetch_releases)
+                shelves = shelves_future.result()
+                playlists = playlists_future.result()
+                new_releases = releases_future.result()
             normalized_shelves = []
             for shelf in shelves if isinstance(shelves, list) else []:
                 if not isinstance(shelf, dict):
@@ -782,17 +886,8 @@ class YouTubeMusicService:
                 items = self._normalize_many(shelf.get("contents"))
                 if items:
                     normalized_shelves.append({"title": str(shelf.get("title") or ""), "items": items})
-            playlists: List[Dict[str, Any]] = []
-            if self._has_auth():
-                try:
-                    with self._request_context(client):
-                        library_playlists = client.get_library_playlists(limit=30)
-                    playlists = self._normalize_many(library_playlists, "playlist")
-                except Exception as exc:
-                    self._log(f"YouTube Music playlists unavailable: {exc}")
             if not playlists:
                 playlists = [item for shelf in normalized_shelves for item in shelf["items"] if item.get("type") == "playlist"][:30]
-            new_releases = self._collect_new_releases(client)
             return {
                 "playlists": {"items": playlists},
                 # Both fields intentionally point at the official new-albums shelf.
@@ -802,14 +897,12 @@ class YouTubeMusicService:
                 "sections": normalized_shelves,
             }
 
-        return self._cached("home", 300.0, produce)
+        return self._cached("home", 1800.0, produce)
 
     def search(self, query: str) -> Dict[str, Any]:
         cleaned = str(query or "").strip()[:180]
         if len(cleaned) < 2:
             return {"tracks": {"items": []}, "albums": {"items": []}, "artists": {"items": []}, "playlists": {"items": []}}
-        client = self._client_for_request()
-
         def produce() -> Dict[str, Any]:
             # Unfiltered search shelves label the first flex column with the
             # result type ("Song", "Video"), which ytmusicapi surfaces as a fake
@@ -820,39 +913,63 @@ class YouTubeMusicService:
                 "artists": ("artists", "artist"),
                 "playlists": ("playlists", "playlist"),
             }
-            groups: Dict[str, List[Dict[str, Any]]] = {}
-            for key, (search_filter, forced_type) in searches.items():
+            request_clients = {
+                key: self._independent_client_for_request()
+                for key in searches
+            }
+
+            def fetch_group(request_client: Any, search_filter: str, forced_type: str) -> List[Dict[str, Any]]:
                 try:
-                    with self._request_context(client):
-                        values = client.search(cleaned, filter=search_filter, limit=20)
+                    with self._request_context(request_client):
+                        values = request_client.search(cleaned, filter=search_filter, limit=20)
                 except Exception as exc:
                     self._log(f"YouTube Music search ({search_filter}) error: {type(exc).__name__}: {exc}")
                     values = []
-                groups[key] = self._normalize_many(values, forced_type)[:20]
+                return self._normalize_many(values, forced_type)[:20]
+
+            groups: Dict[str, List[Dict[str, Any]]] = {}
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="NowPlaying-YTM-Search") as pool:
+                futures = {
+                    key: pool.submit(fetch_group, request_clients[key], search_filter, forced_type)
+                    for key, (search_filter, forced_type) in searches.items()
+                }
+                for key, future in futures.items():
+                    groups[key] = future.result()
             return {key: {"items": items} for key, items in groups.items()}
 
-        return self._cached(f"search:{cleaned.casefold()}", 180.0, produce)
+        return self._cached(f"search:{cleaned.casefold()}", 900.0, produce)
 
     def get_library(self, section: str, max_items: int = 100) -> Dict[str, Any]:
         if not self._has_auth():
             return {"artists": {"items": []}} if section == "artists" else {"items": []}
-        client = self._client_for_request(True)
         requested = int(max_items if max_items is not None else 100)
         load_all = requested <= 0
         limit: Optional[int] = None if load_all else max(1, min(requested or 100, 300))
         section = str(section or "tracks")
 
         def produce() -> Dict[str, Any]:
-            cached = self._read_library_cache().get(section)
+            with self._lock:
+                library_cache_generation = self._cache_generation
+                cached = self._read_library_cache().get(section)
             if isinstance(cached, dict) and isinstance(cached.get("payload"), dict):
-                payload = json.loads(json.dumps(cached.get("payload")))
+                payload = cached.get("payload")
                 if load_all and cached.get("complete"):
                     return payload
                 if not load_all:
-                    container = payload.get("artists") if section == "artists" else payload
-                    if isinstance(container, dict) and isinstance(container.get("items"), list):
-                        container["items"] = container["items"][:int(limit or 100)]
-                        return payload
+                    source = payload.get("artists") if section == "artists" else payload
+                    if isinstance(source, dict) and isinstance(source.get("items"), list):
+                        container = dict(source)
+                        all_items = source["items"]
+                        container["items"] = all_items[:int(limit or 100)]
+                        container["limit"] = len(container["items"])
+                        container["total"] = max(len(all_items), int(source.get("total") or 0))
+                        container["next"] = "cached" if len(container["items"]) < container["total"] else None
+                        if section == "artists":
+                            result = dict(payload)
+                            result["artists"] = container
+                            return result
+                        return container
+            client = self._client_for_request(True)
             with self._request_context(client):
                 if section == "tracks":
                     raw = client.get_library_songs(limit=limit)
@@ -871,7 +988,7 @@ class YouTubeMusicService:
                     forced = "track"
             items = self._normalize_many(raw, forced)
             payload = {"artists": {"items": items}} if section == "artists" else {"items": items}
-            self._write_library_cache(section, payload, load_all)
+            self._write_library_cache(section, payload, load_all, library_cache_generation)
             return payload
 
         return self._cached(f"library:{section}:{'all' if load_all else limit}", 360.0, produce)
@@ -1276,7 +1393,7 @@ class YouTubeMusicService:
             except Exception as cookie_exc:
                 self._log(f"YouTube Music cookie file unavailable: {cookie_exc}")
 
-        # Claude's previous build forced the non-existent yt-dlp clients
+        # Older builds forced yt-dlp clients that do not exist.
         # `android_music`/`ios_music`, which yields metadata but no playable
         # formats. Try only clients supported by the bundled yt-dlp version and
         # fall back from the Music URL to the normal watch URL when necessary.

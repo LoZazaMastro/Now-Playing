@@ -6609,6 +6609,8 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
                     if (pollRef.current)
                         window.clearInterval(pollRef.current);
                     pollRef.current = 0;
+                    if (status.state === "authenticated")
+                        clearSpotifyLibrarySessionCaches();
                     applySettings(status);
                     setBusy(false);
                 }
@@ -6663,7 +6665,10 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
     async function saveClientId() {
         try {
             setBusy(true);
+            const changed = clientId.trim() !== settings.clientId;
             const next = await setSpotifyClientId(clientId);
+            if (changed)
+                clearSpotifyLibrarySessionCaches();
             applySettings(next);
             toaster.toast({ title: "Spotify", body: t.clientIdSaved, duration: 2200 });
         }
@@ -6679,6 +6684,7 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
             setBusy(true);
             if (clientId.trim() !== settings.clientId) {
                 const next = await setSpotifyClientId(clientId);
+                clearSpotifyLibrarySessionCaches();
                 applySettings(next);
             }
             const result = await beginSpotifyAuth();
@@ -6895,7 +6901,10 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
                                     cursor: "text",
                                 } }), SP_JSX.jsx("div", { style: { height: "6px" } }), SP_JSX.jsx(DFL.DialogButton, { style: fullButtonStyle, disabled: busy || !clientId.trim(), onClick: () => void saveClientId(), children: SP_JSX.jsx("span", { children: t.saveClientId }) }), SP_JSX.jsx("div", { style: { height: "8px" } }), settings.authenticated ? (SP_JSX.jsx(DFL.DialogButton, { style: fullButtonStyle, disabled: busy, onClick: () => void disconnect(), children: SP_JSX.jsxs("span", { children: [SP_JSX.jsx(FaSignOutAlt, {}), " ", t.disconnect] }) })) : (SP_JSX.jsx(DFL.DialogButton, { className: "npSpotifyConnectButton", style: { ...fullButtonStyle, background: SPOTIFY_GREEN, color: "#fff" }, disabled: busy || !clientId.trim(), onClick: () => void connect(), children: SP_JSX.jsxs("span", { style: { fontWeight: 800 }, children: [SP_JSX.jsx(SiSpotify, {}), " ", t.connect] }) })), authState === "waiting" || statusText ? (SP_JSX.jsx("div", { style: { marginTop: "8px", fontSize: "0.7em", opacity: authState === "error" ? 1 : 0.68, color: authState === "error" ? "#ff7777" : "inherit" }, children: statusText })) : null, SP_JSX.jsx("p", { style: { margin: "10px 0 0", fontSize: "0.67em", lineHeight: 1.42, opacity: 0.54 }, children: t.premiumNote })] })) : null, SP_JSX.jsxs("div", { style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }, children: [SP_JSX.jsx("p", { style: { margin: "0 2px 9px", fontSize: "0.67em", lineHeight: 1.42, opacity: 0.56 }, children: t.cacheExplanation }), SP_JSX.jsx(DFL.DialogButton, { style: fullButtonStyle, disabled: refreshBusy, onClick: () => {
                                     setRefreshBusy(true);
-                                    void refreshSpotifyCache().finally(() => setRefreshBusy(false));
+                                    void refreshSpotifyCache()
+                                        .then((result) => { if (result?.ok)
+                                        clearSpotifyLibrarySessionCaches(); })
+                                        .finally(() => setRefreshBusy(false));
                                 }, children: SP_JSX.jsxs("span", { children: [SP_JSX.jsx(FaSyncAlt, { className: refreshBusy ? "npRestartSpin" : undefined }), " ", t.refresh] }) }), SP_JSX.jsx("div", { style: { height: "12px" } }), SP_JSX.jsx("div", { style: { fontSize: "0.76em", fontWeight: 700, marginBottom: "7px" }, children: t.audioQuality }), SP_JSX.jsx(DFL.Focusable, { style: { display: "flex", flexDirection: "column", gap: "6px", width: "100%" }, "flow-children": "vertical", children: [96, 160, 320].map((quality) => {
                                     const active = (settings.audioQuality ?? 320) === quality;
                                     return (SP_JSX.jsx(DFL.DialogButton, { disabled: busy, style: {
@@ -6916,8 +6925,42 @@ function SpotifyPlusSettingsPanel({ selectedService, onSettingsChanged, }) {
                                                                 : `${artistCacheProgress.phase === "clearing" ? t.artistCacheClearing : artistCacheProgress.phase === "clearing_manual" ? t.manualBackgroundsRemoving : t.artistCacheProgress}: ${artistCacheProgress.completed}/${artistCacheProgress.total}` }), SP_JSX.jsx("div", { style: { height: "4px", marginTop: "6px", borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.1)" }, children: SP_JSX.jsx("div", { style: { width: `${artistCacheProgress.total > 0 ? Math.min(100, (artistCacheProgress.completed / artistCacheProgress.total) * 100) : (artistCacheBusy ? 18 : 100)}%`, height: "100%", background: SPOTIFY_GREEN, transition: "width 180ms ease" } }) })] })) : null, SP_JSX.jsxs("div", { style: { marginTop: 7, padding: "7px 9px", borderRadius: 7, background: "rgba(255,255,255,.035)", display: "grid", gap: 5, fontSize: ".66em" }, children: [SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [SP_JSX.jsx("span", { style: { opacity: .58 }, children: t.cacheSize }), SP_JSX.jsxs("strong", { children: [(Math.max(0, Number(artistCacheStats.bytes || 0)) / (1024 * 1024)).toFixed(2), " MB"] })] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [SP_JSX.jsx("span", { style: { opacity: .58 }, children: t.manualBackgrounds }), SP_JSX.jsxs("strong", { children: [(Math.max(0, Number(artistCacheStats.manualBytes || 0)) / (1024 * 1024)).toFixed(2), " MB"] })] })] })] }), SP_JSX.jsxs("div", { style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }, children: [SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }, children: [SP_JSX.jsx("span", { style: { fontSize: "0.76em", fontWeight: 700 }, children: t.apiUsageTitle }), SP_JSX.jsxs("span", { style: { fontSize: "0.66em", opacity: 0.6, fontVariantNumeric: "tabular-nums" }, children: [apiUsage.total, " ", t.apiUsageTotal] })] }), SP_JSX.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [SP_JSX.jsx("div", { style: { position: "relative", flex: 1, height: "6px", borderRadius: "999px", background: "rgba(255,255,255,0.12)", overflow: "hidden" }, children: SP_JSX.jsx("div", { style: { position: "absolute", inset: 0, width: `${Math.max(0, Math.min(100, (apiUsage.perMinute / 60) * 100))}%`, background: apiUsage.rateLimited ? "#ff7777" : SPOTIFY_GREEN, borderRadius: "999px", transition: "width 240ms ease" } }) }), SP_JSX.jsxs("span", { style: { fontSize: "0.68em", fontVariantNumeric: "tabular-nums", minWidth: "76px", textAlign: "right" }, children: [apiUsage.perMinute, " ", t.apiUsagePerMinute] })] }), apiUsage.rateLimited ? SP_JSX.jsxs("div", { style: { marginTop: "6px", fontSize: "0.64em", color: "#ff9a9a" }, children: [t.apiUsagePaused, apiUsage.remainingSeconds > 0 ? ` · ${apiUsage.remainingSeconds}s` : ""] }) : null] })] })] })] }));
 }
 const spotifyLibrarySessionCache = new Map();
+const spotifyLibraryHydrations = new Map();
+let spotifyLibraryCacheRevision = 0;
+function spotifyLibraryEntries(payload, section) {
+    const items = section === "artists" ? payload?.artists?.items : payload?.items;
+    return Array.isArray(items) ? items : [];
+}
+function spotifyLibraryNeedsHydration(payload, section) {
+    const container = section === "artists" ? payload?.artists : payload;
+    const items = spotifyLibraryEntries(payload, section);
+    const total = Math.max(0, Number(container?.total ?? items.length));
+    return Boolean(container?.next) || total > items.length;
+}
+function hydrateSpotifyLibrary(section, onReady) {
+    const revision = spotifyLibraryCacheRevision;
+    let request = spotifyLibraryHydrations.get(section);
+    if (!request) {
+        request = spotifyGetLibrary(section, 0, 0)
+            .then((result) => result?.ok ? (result.data ?? null) : null)
+            .catch(() => null);
+        spotifyLibraryHydrations.set(section, request);
+        void request.finally(() => {
+            if (spotifyLibraryHydrations.get(section) === request)
+                spotifyLibraryHydrations.delete(section);
+        });
+    }
+    void request.then((value) => {
+        if (!value || revision !== spotifyLibraryCacheRevision)
+            return;
+        spotifyLibrarySessionCache.set(section, value);
+        onReady(value);
+    });
+}
 function clearSpotifyLibrarySessionCaches() {
+    spotifyLibraryCacheRevision += 1;
     spotifyLibrarySessionCache.clear();
+    spotifyLibraryHydrations.clear();
 }
 function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSettings }) {
     const t = useSpotifyTranslations();
@@ -6926,6 +6969,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
     const [searchTerm, setSearchTerm] = SP_REACT.useState("");
     const [searchResults, setSearchResults] = SP_REACT.useState(null);
     const [librarySection, setLibrarySection] = SP_REACT.useState("tracks");
+    const librarySectionRef = SP_REACT.useRef("tracks");
     const [library, setLibrary] = SP_REACT.useState(null);
     const [detail, setDetail] = SP_REACT.useState(null);
     const [detailHistory, setDetailHistory] = SP_REACT.useState([]);
@@ -6985,6 +7029,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
     const loadLibrary = SP_REACT.useCallback((section, focusItems = true, force = false) => {
         if (focusItems)
             requestListFocus();
+        librarySectionRef.current = section;
         setLibrarySection(section);
         setDetail(null);
         setDetailHistory([]);
@@ -6993,14 +7038,23 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
         if (!force && cached) {
             setLibrary(cached);
             setLoading(false);
+            if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(cached, section)) {
+                hydrateSpotifyLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
             return;
         }
-        void run(
-        // Saved tracks: 50 while compact, otherwise 0 = load the whole library so
-        // the user can see and play every saved track.
-        () => spotifyGetLibrary(section, 0, section === "tracks" ? (compactSavedTracks ? 50 : 0) : 100), (value) => {
+        void run(() => spotifyGetLibrary(section, 0, section === "tracks" && compactSavedTracks ? 50 : 120), (value) => {
             spotifyLibrarySessionCache.set(section, value);
             setLibrary(value);
+            if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(value, section)) {
+                hydrateSpotifyLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
         });
     }, [requestListFocus, run, compactSavedTracks]);
     const compactInitRef = SP_REACT.useRef(true);
@@ -7011,7 +7065,7 @@ function SpotifyBrowserContent({ openAlbumRequest, onOpenBigPicture, onOpenSetti
             compactInitRef.current = false;
             return;
         }
-        spotifyLibrarySessionCache.delete("tracks");
+        clearSpotifyLibrarySessionCaches();
         if (librarySection === "tracks")
             loadLibrary("tracks", false, true);
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -7458,6 +7512,7 @@ function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
     const coreT = SP_REACT.useMemo(() => getTranslations("core"), []);
     const [tab, setTab] = SP_REACT.useState("home");
     const [librarySection, setLibrarySection] = SP_REACT.useState("tracks");
+    const librarySectionRef = SP_REACT.useRef("tracks");
     const [history, setHistory] = SP_REACT.useState([]);
     const [detail, setDetail] = SP_REACT.useState(null);
     const [detailData, setDetailData] = SP_REACT.useState(null);
@@ -7688,20 +7743,30 @@ function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
         void run(() => spotifyGetHome(), setHome);
     }, [focusFirst, run]);
     const loadLibrary = SP_REACT.useCallback((section, force = false) => {
+        librarySectionRef.current = section;
         setLibrarySection(section);
         focusFirst();
         const cached = spotifyLibrarySessionCache.get(section);
         if (!force && cached) {
             setLibrary(cached);
             setLoading(false);
+            if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(cached, section)) {
+                hydrateSpotifyLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
             return;
         }
-        void run(
-        // Load the whole saved-tracks library when compaction is off so the Big
-        // Picture list can show and play every track (50 while compact).
-        () => spotifyGetLibrary(section, 0, section === "tracks" ? (compactSavedTracks ? 50 : 0) : 0), (value) => {
+        void run(() => spotifyGetLibrary(section, 0, section === "tracks" && compactSavedTracks ? 50 : 120), (value) => {
             spotifyLibrarySessionCache.set(section, value);
             setLibrary(value);
+            if (!(section === "tracks" && compactSavedTracks) && spotifyLibraryNeedsHydration(value, section)) {
+                hydrateSpotifyLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
         });
     }, [focusFirst, run, compactSavedTracks]);
     const compactInitBpRef = SP_REACT.useRef(true);
@@ -7710,7 +7775,7 @@ function SpotifyBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
             compactInitBpRef.current = false;
             return;
         }
-        spotifyLibrarySessionCache.delete("tracks");
+        clearSpotifyLibrarySessionCaches();
         if (librarySection === "tracks")
             loadLibrary("tracks", true);
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -9679,6 +9744,40 @@ function libraryItems(payload, section) {
     const value = section === "artists" ? payload?.artists?.items : payload?.items;
     return Array.isArray(value) ? value : [];
 }
+const youtubeMusicLibrarySessionCache = new Map();
+const youtubeMusicLibraryHydrations = new Map();
+let youtubeMusicLibraryCacheRevision = 0;
+function youtubeMusicLibraryNeedsHydration(payload, section) {
+    const container = section === "artists" ? payload?.artists : payload;
+    const items = libraryItems(payload, section);
+    const total = Math.max(0, Number(container?.total ?? items.length));
+    return Boolean(container?.next) || total > items.length || items.length >= 120;
+}
+function hydrateYouTubeMusicLibrary(section, onReady) {
+    const revision = youtubeMusicLibraryCacheRevision;
+    let request = youtubeMusicLibraryHydrations.get(section);
+    if (!request) {
+        request = youtubeMusicGetLibrary(section, 0)
+            .then((result) => result?.ok ? (result.data ?? null) : null)
+            .catch(() => null);
+        youtubeMusicLibraryHydrations.set(section, request);
+        void request.finally(() => {
+            if (youtubeMusicLibraryHydrations.get(section) === request)
+                youtubeMusicLibraryHydrations.delete(section);
+        });
+    }
+    void request.then((value) => {
+        if (!value || revision !== youtubeMusicLibraryCacheRevision)
+            return;
+        youtubeMusicLibrarySessionCache.set(section, value);
+        onReady(value);
+    });
+}
+function clearYouTubeMusicLibrarySessionCache() {
+    youtubeMusicLibraryCacheRevision += 1;
+    youtubeMusicLibrarySessionCache.clear();
+    youtubeMusicLibraryHydrations.clear();
+}
 function shuffledCopy(items) {
     const result = [...items];
     for (let index = result.length - 1; index > 0; index -= 1) {
@@ -9774,6 +9873,7 @@ function YouTubeMusicSettingsPanel({ selectedService = "youtubeMusic" }) {
                     setAuthRunning(false);
                     setBusy(false);
                     if (status.phase === "connected" && status.settings) {
+                        clearYouTubeMusicLibrarySessionCache();
                         setSettings(status.settings);
                         toaster.toast({ title: "YouTube Music", body: t.connected, duration: 2400 });
                     }
@@ -9928,8 +10028,10 @@ function YouTubeMusicSettingsPanel({ selectedService = "youtubeMusic" }) {
             void reloadArtistCacheStats();
         }
     };
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: { padding: "0 4px", margin: "14px 0 6px", fontSize: "0.74em", fontWeight: 800, letterSpacing: "0.035em", textTransform: "uppercase", opacity: 0.62 }, children: "YouTube Music" }), SP_JSX.jsxs("div", { className: "npYtmSettings", style: { ...settingsCard, opacity: selectedService === "youtubeMusic" ? 1 : .86 }, children: [SP_JSX.jsx("style", { children: `.npYtmSettings button,.npYtmSettings button *{color:#fff!important;text-align:left!important}.npYtmSettings button{font-size:.82em!important;transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease!important}.npYtmSettings button span{font-size:1em!important}.npYtmSettings button>span{width:100%!important;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:flex-start!important;text-align:left!important;padding:0 10px!important;gap:7px!important;line-height:1.15!important}.npYtmSettings button:hover,.npYtmSettings button:focus,.npYtmSettings button.gpfocus{color:#fff!important;background:rgba(255,255,255,.12)!important;border-color:rgba(255,255,255,.24)!important;box-shadow:0 0 0 1px rgba(255,0,51,.28),0 0 18px rgba(255,0,51,.15)!important}.npYtmSettings input{box-sizing:border-box!important}` }), SP_JSX.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }, children: [SP_JSX.jsx(SiYoutubemusic, { size: 24, color: "#fff", style: { flexShrink: 0 } }), SP_JSX.jsxs("span", { style: { minWidth: 0 }, children: [SP_JSX.jsx("strong", { style: { display: "block", fontSize: "1em", lineHeight: 1.1, fontWeight: 620 }, children: "YouTube Music" }), SP_JSX.jsx("span", { style: { display: "block", fontSize: ".72em", opacity: .62, marginTop: "2px" }, children: settings.authenticated ? String(settings.displayName || t.connected) : t.yourMusicInsideSteam })] })] }), !settings.authenticated ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("p", { style: { fontSize: ".72em", lineHeight: 1.42, opacity: .72, margin: "10px 2px 7px" }, children: authRunning ? t.completeSignIn : t.automaticSignInDescription }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, disabled: busy, onClick: () => void startAutomaticAuth(), children: SP_JSX.jsx("span", { style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center" }, children: authRunning ? t.loadingSpotify : t.connect }) }), authError ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: { marginTop: "7px", fontSize: ".7em", lineHeight: 1.35, color: "#ff9aaa" }, children: authError }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, onClick: () => setShowManualAuth((value) => !value), children: SP_JSX.jsx("span", { style: { width: "100%", display: "flex", justifyContent: "center", textAlign: "center" }, children: showManualAuth ? t.hideDetails : t.showDetails }) })] }) : null, showManualAuth ? SP_JSX.jsxs("div", { style: { marginTop: "9px" }, children: [SP_JSX.jsx("p", { style: { fontSize: ".72em", lineHeight: 1.42, opacity: .72, margin: "0 0 7px" }, children: t.browserHeadersDescription }), SP_JSX.jsx(DFL.TextField, { value: headers, label: t.browserHeaders, onChange: (value) => setHeaders(typeof value === "string" ? value : String(value?.target?.value ?? "")) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, disabled: busy || !headers.trim(), onClick: () => void run(() => connectYouTubeMusic(headers), t.connected), children: SP_JSX.jsx("span", { style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center" }, children: t.connect }) })] }) : null] }) : SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, disabled: busy, onClick: () => void run(() => disconnectYouTubeMusic(), t.disconnect), children: SP_JSX.jsxs("span", { style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", textAlign: "center" }, children: [SP_JSX.jsx(FaSignOutAlt, {}), t.disconnect] }) }), SP_JSX.jsx("div", { style: { marginTop: "12px", fontSize: ".76em", fontWeight: 700, opacity: .72 }, children: t.audioQuality }), ["low", "medium", "high"].map((quality) => SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "6px", border: settings.audioQuality === quality ? `1px solid ${YOUTUBE_RED}` : undefined }, disabled: busy, onClick: () => void run(() => setYouTubeMusicAudioQuality(quality)), children: SP_JSX.jsxs("span", { style: { width: "100%", padding: "0 10px", boxSizing: "border-box", display: "flex", justifyContent: "space-between" }, children: [SP_JSX.jsx("span", { children: { low: t.qualityLow, medium: t.qualityMedium, high: t.qualityHigh }[quality] }), settings.audioQuality === quality ? SP_JSX.jsx("span", { style: { color: YOUTUBE_RED }, children: "\u25cf" }) : null] }) }, quality)), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "10px" }, onClick: () => void refreshYouTubeMusicCache().then((result) => { if (!result.ok)
-                            throw new Error(result.error); toaster.toast({ title: "YouTube Music", body: t.refresh, duration: 2000 }); }).catch(notifyError), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaSyncAlt, {}), t.refresh] }) }), SP_JSX.jsxs("div", { style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }, children: [SP_JSX.jsx("div", { style: { fontSize: "0.8em", fontWeight: 700, marginBottom: "5px" }, children: st.artistCacheTitle }), SP_JSX.jsx("p", { style: { margin: "0 2px 9px", fontSize: "0.72em", lineHeight: 1.42, opacity: 0.56 }, children: t.artistCacheDescription }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, opacity: settings.authenticated ? 1 : .5 }, disabled: !settings.authenticated || artistCacheBusy, onClick: () => void createArtistCache(), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaSyncAlt, {}), " ", artistCacheBusy && artistCacheProgress.phase !== "clearing" && artistCacheProgress.phase !== "clearing_manual" ? st.artistCacheBuilding : st.createArtistCache] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "6px", opacity: artistCacheStats.files > 0 ? 1 : .58 }, disabled: artistCacheBusy || artistCacheStats.files <= 0, onClick: () => void clearArtistCache(), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaTimes, {}), " ", artistCacheProgress.phase === "clearing" ? st.artistCacheClearing : st.clearArtistCache] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "6px", opacity: Number(artistCacheStats.manualFiles || 0) > 0 ? 1 : .58 }, disabled: artistCacheBusy || Number(artistCacheStats.manualFiles || 0) <= 0, onClick: () => void clearManualBackgrounds(), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaTimes, {}), " ", artistCacheProgress.phase === "clearing_manual" ? st.manualBackgroundsRemoving : st.removeManualBackgrounds] }) }), SP_JSX.jsx("p", { style: { margin: "7px 2px 0", fontSize: "0.66em", lineHeight: 1.4, opacity: 0.52 }, children: st.manualBackgroundsDescription }), (artistCacheBusy && artistCacheProgress.total > 0) ? (SP_JSX.jsxs("div", { style: { marginTop: "9px" }, children: [SP_JSX.jsx("div", { style: { fontSize: "0.66em", opacity: .7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: artistCacheProgress.current || `${artistCacheProgress.completed}/${artistCacheProgress.total}` }), SP_JSX.jsx("div", { style: { height: "4px", marginTop: "6px", borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.1)" }, children: SP_JSX.jsx("div", { style: { width: `${Math.min(100, (artistCacheProgress.completed / Math.max(1, artistCacheProgress.total)) * 100)}%`, height: "100%", background: YOUTUBE_RED, transition: "width 180ms ease" } }) })] })) : null, SP_JSX.jsxs("div", { style: { marginTop: 7, padding: "7px 9px", borderRadius: 7, background: "rgba(255,255,255,.035)", display: "grid", gap: 5, fontSize: ".72em" }, children: [SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [SP_JSX.jsx("span", { style: { opacity: .58 }, children: st.cacheSize }), SP_JSX.jsxs("strong", { children: [(Math.max(0, Number(artistCacheStats.bytes || 0)) / (1024 * 1024)).toFixed(2), " MB"] })] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [SP_JSX.jsx("span", { style: { opacity: .58 }, children: st.manualBackgrounds }), SP_JSX.jsxs("strong", { children: [(Math.max(0, Number(artistCacheStats.manualBytes || 0)) / (1024 * 1024)).toFixed(2), " MB"] })] })] })] })] })] }));
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: { padding: "0 4px", margin: "14px 0 6px", fontSize: "0.74em", fontWeight: 800, letterSpacing: "0.035em", textTransform: "uppercase", opacity: 0.62 }, children: "YouTube Music" }), SP_JSX.jsxs("div", { className: "npYtmSettings", style: { ...settingsCard, opacity: selectedService === "youtubeMusic" ? 1 : .86 }, children: [SP_JSX.jsx("style", { children: `.npYtmSettings button,.npYtmSettings button *{color:#fff!important;text-align:left!important}.npYtmSettings button{font-size:.82em!important;transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease!important}.npYtmSettings button span{font-size:1em!important}.npYtmSettings button>span{width:100%!important;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:flex-start!important;text-align:left!important;padding:0 10px!important;gap:7px!important;line-height:1.15!important}.npYtmSettings button:hover,.npYtmSettings button:focus,.npYtmSettings button.gpfocus{color:#fff!important;background:rgba(255,255,255,.12)!important;border-color:rgba(255,255,255,.24)!important;box-shadow:0 0 0 1px rgba(255,0,51,.28),0 0 18px rgba(255,0,51,.15)!important}.npYtmSettings input{box-sizing:border-box!important}` }), SP_JSX.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }, children: [SP_JSX.jsx(SiYoutubemusic, { size: 24, color: "#fff", style: { flexShrink: 0 } }), SP_JSX.jsxs("span", { style: { minWidth: 0 }, children: [SP_JSX.jsx("strong", { style: { display: "block", fontSize: "1em", lineHeight: 1.1, fontWeight: 620 }, children: "YouTube Music" }), SP_JSX.jsx("span", { style: { display: "block", fontSize: ".72em", opacity: .62, marginTop: "2px" }, children: settings.authenticated ? String(settings.displayName || t.connected) : t.yourMusicInsideSteam })] })] }), !settings.authenticated ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("p", { style: { fontSize: ".72em", lineHeight: 1.42, opacity: .72, margin: "10px 2px 7px" }, children: authRunning ? t.completeSignIn : t.automaticSignInDescription }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, disabled: busy, onClick: () => void startAutomaticAuth(), children: SP_JSX.jsx("span", { style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center" }, children: authRunning ? t.loadingSpotify : t.connect }) }), authError ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: { marginTop: "7px", fontSize: ".7em", lineHeight: 1.35, color: "#ff9aaa" }, children: authError }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, onClick: () => setShowManualAuth((value) => !value), children: SP_JSX.jsx("span", { style: { width: "100%", display: "flex", justifyContent: "center", textAlign: "center" }, children: showManualAuth ? t.hideDetails : t.showDetails }) })] }) : null, showManualAuth ? SP_JSX.jsxs("div", { style: { marginTop: "9px" }, children: [SP_JSX.jsx("p", { style: { fontSize: ".72em", lineHeight: 1.42, opacity: .72, margin: "0 0 7px" }, children: t.browserHeadersDescription }), SP_JSX.jsx(DFL.TextField, { value: headers, label: t.browserHeaders, onChange: (value) => setHeaders(typeof value === "string" ? value : String(value?.target?.value ?? "")) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, disabled: busy || !headers.trim(), onClick: () => void run(async () => { const result = await connectYouTubeMusic(headers); if (result.ok)
+                                            clearYouTubeMusicLibrarySessionCache(); return result; }, t.connected), children: SP_JSX.jsx("span", { style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center" }, children: t.connect }) })] }) : null] }) : SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "7px" }, disabled: busy, onClick: () => void run(async () => { const result = await disconnectYouTubeMusic(); if (result.ok)
+                            clearYouTubeMusicLibrarySessionCache(); return result; }, t.disconnect), children: SP_JSX.jsxs("span", { style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", textAlign: "center" }, children: [SP_JSX.jsx(FaSignOutAlt, {}), t.disconnect] }) }), SP_JSX.jsx("div", { style: { marginTop: "12px", fontSize: ".76em", fontWeight: 700, opacity: .72 }, children: t.audioQuality }), ["low", "medium", "high"].map((quality) => SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "6px", border: settings.audioQuality === quality ? `1px solid ${YOUTUBE_RED}` : undefined }, disabled: busy, onClick: () => void run(() => setYouTubeMusicAudioQuality(quality)), children: SP_JSX.jsxs("span", { style: { width: "100%", padding: "0 10px", boxSizing: "border-box", display: "flex", justifyContent: "space-between" }, children: [SP_JSX.jsx("span", { children: { low: t.qualityLow, medium: t.qualityMedium, high: t.qualityHigh }[quality] }), settings.audioQuality === quality ? SP_JSX.jsx("span", { style: { color: YOUTUBE_RED }, children: "\u25cf" }) : null] }) }, quality)), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "10px" }, onClick: () => void refreshYouTubeMusicCache().then((result) => { if (!result.ok)
+                            throw new Error(result.error); clearYouTubeMusicLibrarySessionCache(); toaster.toast({ title: "YouTube Music", body: t.refresh, duration: 2000 }); }).catch(notifyError), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaSyncAlt, {}), t.refresh] }) }), SP_JSX.jsxs("div", { style: { marginTop: "12px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.08)" }, children: [SP_JSX.jsx("div", { style: { fontSize: "0.8em", fontWeight: 700, marginBottom: "5px" }, children: st.artistCacheTitle }), SP_JSX.jsx("p", { style: { margin: "0 2px 9px", fontSize: "0.72em", lineHeight: 1.42, opacity: 0.56 }, children: t.artistCacheDescription }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, opacity: settings.authenticated ? 1 : .5 }, disabled: !settings.authenticated || artistCacheBusy, onClick: () => void createArtistCache(), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaSyncAlt, {}), " ", artistCacheBusy && artistCacheProgress.phase !== "clearing" && artistCacheProgress.phase !== "clearing_manual" ? st.artistCacheBuilding : st.createArtistCache] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "6px", opacity: artistCacheStats.files > 0 ? 1 : .58 }, disabled: artistCacheBusy || artistCacheStats.files <= 0, onClick: () => void clearArtistCache(), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaTimes, {}), " ", artistCacheProgress.phase === "clearing" ? st.artistCacheClearing : st.clearArtistCache] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, marginTop: "6px", opacity: Number(artistCacheStats.manualFiles || 0) > 0 ? 1 : .58 }, disabled: artistCacheBusy || Number(artistCacheStats.manualFiles || 0) <= 0, onClick: () => void clearManualBackgrounds(), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }, children: [SP_JSX.jsx(FaTimes, {}), " ", artistCacheProgress.phase === "clearing_manual" ? st.manualBackgroundsRemoving : st.removeManualBackgrounds] }) }), SP_JSX.jsx("p", { style: { margin: "7px 2px 0", fontSize: "0.66em", lineHeight: 1.4, opacity: 0.52 }, children: st.manualBackgroundsDescription }), (artistCacheBusy && artistCacheProgress.total > 0) ? (SP_JSX.jsxs("div", { style: { marginTop: "9px" }, children: [SP_JSX.jsx("div", { style: { fontSize: "0.66em", opacity: .7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: artistCacheProgress.current || `${artistCacheProgress.completed}/${artistCacheProgress.total}` }), SP_JSX.jsx("div", { style: { height: "4px", marginTop: "6px", borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.1)" }, children: SP_JSX.jsx("div", { style: { width: `${Math.min(100, (artistCacheProgress.completed / Math.max(1, artistCacheProgress.total)) * 100)}%`, height: "100%", background: YOUTUBE_RED, transition: "width 180ms ease" } }) })] })) : null, SP_JSX.jsxs("div", { style: { marginTop: 7, padding: "7px 9px", borderRadius: 7, background: "rgba(255,255,255,.035)", display: "grid", gap: 5, fontSize: ".72em" }, children: [SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [SP_JSX.jsx("span", { style: { opacity: .58 }, children: st.cacheSize }), SP_JSX.jsxs("strong", { children: [(Math.max(0, Number(artistCacheStats.bytes || 0)) / (1024 * 1024)).toFixed(2), " MB"] })] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [SP_JSX.jsx("span", { style: { opacity: .58 }, children: st.manualBackgrounds }), SP_JSX.jsxs("strong", { children: [(Math.max(0, Number(artistCacheStats.manualBytes || 0)) / (1024 * 1024)).toFixed(2), " MB"] })] })] })] })] })] }));
 }
 function YouTubeMusicBrowserContent({ onOpenBigPicture }) {
     const t = SP_REACT.useMemo(translations, []);
@@ -9938,6 +10040,7 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }) {
     const [searchResults, setSearchResults] = SP_REACT.useState(null);
     const [query, setQuery] = SP_REACT.useState("");
     const [librarySection, setLibrarySection] = SP_REACT.useState("tracks");
+    const librarySectionRef = SP_REACT.useRef("tracks");
     const [library, setLibrary] = SP_REACT.useState(null);
     const [detail, setDetail] = SP_REACT.useState(null);
     const [loading, setLoading] = SP_REACT.useState(false);
@@ -9965,6 +10068,32 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }) {
     const loadHome = SP_REACT.useCallback(() => { void run(youtubeMusicGetHome, setHome); }, [run]);
     SP_REACT.useEffect(() => { if (!home)
         loadHome(); }, [home, loadHome]);
+    const loadLibrary = SP_REACT.useCallback((section) => {
+        librarySectionRef.current = section;
+        setLibrarySection(section);
+        const cached = youtubeMusicLibrarySessionCache.get(section);
+        if (cached) {
+            setLibrary(cached);
+            setLoading(false);
+            if (youtubeMusicLibraryNeedsHydration(cached, section)) {
+                hydrateYouTubeMusicLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
+            return;
+        }
+        void run(() => youtubeMusicGetLibrary(section, 120), (value) => {
+            youtubeMusicLibrarySessionCache.set(section, value);
+            setLibrary(value);
+            if (youtubeMusicLibraryNeedsHydration(value, section)) {
+                hydrateYouTubeMusicLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
+        });
+    }, [run]);
     const openDetail = (item) => {
         const kind = itemType(item);
         if (kind === "track") {
@@ -9990,13 +10119,13 @@ function YouTubeMusicBrowserContent({ onOpenBigPicture }) {
     };
     const tabButton = (key, label, icon) => SP_JSX.jsx(DFL.DialogButton, { style: { flex: 1, minWidth: 0, height: "32px", minHeight: "32px", padding: 0, opacity: tab === key ? 1 : .58 }, onClick: () => { requestSerial.current += 1; setLoading(false); setDetail(null); setTab(key); if (key === "home" && !home)
             loadHome(); if (key === "library" && !library)
-            void run(() => youtubeMusicGetLibrary(librarySection, 0), setLibrary); }, children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "5px", fontSize: ".72em" }, children: [icon, label] }) });
+            loadLibrary(librarySection); }, children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "5px", fontSize: ".72em" }, children: [icon, label] }) });
     const renderHome = () => SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: sectionLabel, children: t.yourPlaylists }), renderRows(home?.playlists?.items ?? []), SP_JSX.jsx("div", { style: sectionLabel, children: t.newReleases }), renderRows(home?.newReleases?.items ?? home?.newForYou?.items ?? []), !home?.playlists?.items?.length && !home?.newForYou?.items?.length && !loading ? SP_JSX.jsx("div", { style: { padding: "12px 8px", textAlign: "center", opacity: .58, fontSize: ".74em" }, children: t.nothingHere }) : null] });
     const renderSearch = () => SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { style: { width: "100%", marginTop: "8px" }, children: [SP_JSX.jsx(DFL.TextField, { value: query, label: t.searchSpotify, onChange: (value) => setQuery(typeof value === "string" ? value : String(value?.target?.value ?? "")), onKeyDown: (event) => { if (event?.key === "Enter")
                             void run(() => youtubeMusicSearch(query), setSearchResults); } }), SP_JSX.jsx("div", { style: { height: "6px" } }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, background: YOUTUBE_RED, color: "#fff" }, disabled: query.trim().length < 2 || loading, onClick: () => void run(() => youtubeMusicSearch(query), setSearchResults), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 800, fontSize: "0.8em" }, children: [SP_JSX.jsx(FaSearch, {}), " ", t.search] }) })] }), ["artists", "albums", "tracks", "playlists"].map((key) => { const items = searchResults?.[key]?.items ?? []; return items.length ? SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { style: sectionLabel, children: String(t[key]) }), renderRows(items, key === "tracks")] }, key) : null; }), searchResults && !["artists", "albums", "tracks", "playlists"].some((key) => searchResults?.[key]?.items?.length) && !loading ? SP_JSX.jsx("div", { style: { padding: "14px 8px", textAlign: "center", opacity: .58, fontSize: ".74em" }, children: t.noResults }) : null] });
     const renderLibrary = () => {
         const items = libraryItems(library, librarySection);
-        return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: { height: "8px" } }), SP_JSX.jsx(DFL.Focusable, { "flow-children": "grid", style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", width: "100%" }, children: ["tracks", "albums", "playlists", "artists"].map((section) => SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, minWidth: 0, opacity: librarySection === section ? 1 : .58 }, onClick: () => { setLibrarySection(section); void run(() => youtubeMusicGetLibrary(section, 0), setLibrary); }, children: SP_JSX.jsx("span", { style: { fontSize: ".74em", textTransform: "capitalize" }, children: String(t[section]) }) }, section)) }), SP_JSX.jsx("div", { style: sectionLabel, children: String(t[librarySection]) }), librarySection === "tracks" && items.length ? SP_JSX.jsxs(DFL.Focusable, { "flow-children": "horizontal", style: { display: "flex", gap: "6px", marginBottom: "7px" }, children: [SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, flex: 1, minWidth: 0, background: YOUTUBE_RED }, onClick: () => void playItems(items), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 800, fontSize: ".8em" }, children: [SP_JSX.jsx(FaPlay, {}), t.play] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, flex: 1, minWidth: 0 }, onClick: () => void playItems(shuffledCopy(items)), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 700, fontSize: ".8em" }, children: [SP_JSX.jsx(FaRandom, {}), t.shuffle] }) })] }) : null, renderRows(items, librarySection === "tracks"), !items.length && !loading ? SP_JSX.jsx("div", { style: { padding: "12px 8px", textAlign: "center", opacity: .58, fontSize: ".74em" }, children: t.nothingHere }) : null] });
+        return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { style: { height: "8px" } }), SP_JSX.jsx(DFL.Focusable, { "flow-children": "grid", style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", width: "100%" }, children: ["tracks", "albums", "playlists", "artists"].map((section) => SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, minWidth: 0, opacity: librarySection === section ? 1 : .58 }, onClick: () => loadLibrary(section), children: SP_JSX.jsx("span", { style: { fontSize: ".74em", textTransform: "capitalize" }, children: String(t[section]) }) }, section)) }), SP_JSX.jsx("div", { style: sectionLabel, children: String(t[librarySection]) }), librarySection === "tracks" && items.length ? SP_JSX.jsxs(DFL.Focusable, { "flow-children": "horizontal", style: { display: "flex", gap: "6px", marginBottom: "7px" }, children: [SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, flex: 1, minWidth: 0, background: YOUTUBE_RED }, onClick: () => void playItems(items), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 800, fontSize: ".8em" }, children: [SP_JSX.jsx(FaPlay, {}), t.play] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { ...fullButton, flex: 1, minWidth: 0 }, onClick: () => void playItems(shuffledCopy(items)), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontWeight: 700, fontSize: ".8em" }, children: [SP_JSX.jsx(FaRandom, {}), t.shuffle] }) })] }) : null, renderRows(items, librarySection === "tracks"), !items.length && !loading ? SP_JSX.jsx("div", { style: { padding: "12px 8px", textAlign: "center", opacity: .58, fontSize: ".74em" }, children: t.nothingHere }) : null] });
     };
     return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("style", { children: `.npYtmBrowser button:focus,.npYtmBrowser button.gpfocus{box-shadow:0 0 0 1px rgba(255,0,51,.55),0 0 18px rgba(255,0,51,.2)!important}.npYtmBrowser input:focus{border-color:${YOUTUBE_RED}!important}.npYtmBrowser .npSpotifyResultButton{scroll-margin-top:64px}.npYtmNavDock{position:sticky;top:-1px;z-index:4;width:calc(100% + 8px);box-sizing:border-box;margin:-2px -4px 0;padding:6px 4px 8px;background:transparent}.npYtmBigPictureButton,.npYtmBigPictureButton:hover,.npYtmBigPictureButton:focus,.npYtmBigPictureButton.gpfocus,.npYtmBigPictureButton *{color:#fff!important}` }), SP_JSX.jsxs(DFL.Focusable, { className: "npYtmBrowser", "flow-children": "vertical", onCancel: detail ? () => { setDetail(null); return true; } : undefined, onCancelButton: detail ? () => { setDetail(null); return true; } : undefined, style: { width: "100%", boxSizing: "border-box" }, children: [SP_JSX.jsx("div", { "aria-hidden": "true", style: { height: "2px", margin: "2px 4px 4px", borderRadius: "999px", background: "linear-gradient(90deg,transparent,rgba(255,0,51,.62),transparent)", boxShadow: "0 0 14px rgba(255,0,51,.24)" } }), !detail ? SP_JSX.jsxs("div", { className: "npYtmNavDock", children: [onOpenBigPicture ? SP_JSX.jsx(DFL.DialogButton, { className: "npYtmBigPictureButton", style: { ...fullButton, marginBottom: "6px", border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.025)" }, onClick: onOpenBigPicture, children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: ".76em", fontWeight: 430, color: "#fff" }, children: [SP_JSX.jsx(FaTv, { size: 12 }), t.spotifyBigPicture] }) }) : null, SP_JSX.jsxs(DFL.Focusable, { "flow-children": "grid", style: { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: "6px", width: "100%" }, children: [tabButton("home", t.home, SP_JSX.jsx(FaHome, {})), tabButton("search", t.search, SP_JSX.jsx(FaSearch, {})), SP_JSX.jsx("div", { style: { gridColumn: "1 / -1", minWidth: 0 }, children: tabButton("library", t.library, SP_JSX.jsx(FaList, {})) })] })] }) : null, loading ? SP_JSX.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "7px", padding: "10px", fontSize: ".72em", opacity: .62 }, children: [SP_JSX.jsx(FaSyncAlt, { className: "npYtmSpin" }), t.loadingSpotify] }) : null, detail ? renderDetail() : tab === "home" ? renderHome() : tab === "search" ? renderSearch() : renderLibrary()] })] });
 }
@@ -10010,6 +10139,7 @@ function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
     const [searchResults, setSearchResults] = SP_REACT.useState(null);
     const [query, setQuery] = SP_REACT.useState("");
     const [librarySection, setLibrarySection] = SP_REACT.useState("tracks");
+    const librarySectionRef = SP_REACT.useRef("tracks");
     const [library, setLibrary] = SP_REACT.useState(null);
     const [detail, setDetail] = SP_REACT.useState(null);
     const [artistHero, setArtistHero] = SP_REACT.useState("");
@@ -10049,6 +10179,33 @@ function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
     const loadHome = SP_REACT.useCallback(() => { void run(youtubeMusicGetHome, setHome); }, [run]);
     SP_REACT.useEffect(() => { if (!home)
         loadHome(); }, [home, loadHome]);
+    const loadLibrary = SP_REACT.useCallback((section) => {
+        librarySectionRef.current = section;
+        setLibrarySection(section);
+        setLibraryTrackVisibleCount(120);
+        const cached = youtubeMusicLibrarySessionCache.get(section);
+        if (cached) {
+            setLibrary(cached);
+            setLoading(false);
+            if (youtubeMusicLibraryNeedsHydration(cached, section)) {
+                hydrateYouTubeMusicLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
+            return;
+        }
+        void run(() => youtubeMusicGetLibrary(section, 120), (value) => {
+            youtubeMusicLibrarySessionCache.set(section, value);
+            setLibrary(value);
+            if (youtubeMusicLibraryNeedsHydration(value, section)) {
+                hydrateYouTubeMusicLibrary(section, (complete) => {
+                    if (librarySectionRef.current === section)
+                        setLibrary(complete);
+                });
+            }
+        });
+    }, [run]);
     // Focus the Home tab on entry so the user never lands on the search bar or
     // elements hidden behind the Big Picture overlay.
     SP_REACT.useEffect(() => {
@@ -10134,7 +10291,7 @@ function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
         if (next === "home" && !home)
             loadHome();
         if (next === "library" && !library)
-            void run(() => youtubeMusicGetLibrary(librarySection, 0), setLibrary);
+            loadLibrary(librarySection);
     };
     const openDetail = (item) => {
         const kind = itemType(item);
@@ -10163,9 +10320,7 @@ function YouTubeMusicBigPicture({ onExit, onOpenVisualizer, onOpenSettings }) {
         const items = libraryItems(library, librarySection);
         const visibleItems = librarySection === "tracks" ? items.slice(0, libraryTrackVisibleCount) : items;
         const loadSection = (section) => {
-            setLibrarySection(section);
-            setLibraryTrackVisibleCount(120);
-            void run(() => youtubeMusicGetLibrary(section, 0), setLibrary);
+            loadLibrary(section);
         };
         return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.Focusable, { "flow-children": "horizontal", style: { display: "flex", gap: "9px", marginTop: "4px" }, children: ["tracks", "albums", "playlists", "artists"].map((section) => (SP_JSX.jsx(DFL.DialogButton, { onClick: () => loadSection(section), style: { width: "166px", minWidth: "166px", height: "44px", borderRadius: "999px", opacity: librarySection === section ? 1 : .58 }, children: SP_JSX.jsx("span", { style: { fontWeight: librarySection === section ? 650 : 500 }, children: String(t[section]) }) }, section))) }), SP_JSX.jsx("h2", { style: { margin: "26px 0 13px", fontSize: "27px", fontWeight: 650 }, children: String(t[librarySection]) }), librarySection === "tracks" ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.Focusable, { "flow-children": "horizontal", style: { display: "flex", gap: "10px", marginBottom: "16px" }, children: [SP_JSX.jsx(DFL.DialogButton, { style: { width: "190px", minWidth: "190px", height: "46px" }, disabled: !items.length, onClick: () => void playItems(items), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontWeight: 550 }, children: [SP_JSX.jsx(FaPlay, {}), t.play] }) }), SP_JSX.jsx(DFL.DialogButton, { style: { width: "190px", minWidth: "190px", height: "46px" }, disabled: !items.length, onClick: () => void playItems(shuffledCopy(items)), children: SP_JSX.jsxs("span", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontWeight: 550 }, children: [SP_JSX.jsx(FaRandom, {}), t.shuffle] }) })] }), SP_JSX.jsx(DFL.Focusable, { "flow-children": "vertical", children: visibleItems.map((track, index) => (SP_JSX.jsx(SpotifyTvTrack, { track: track, index: index, onFocus: () => {
                                     prefetchTrack(track);
@@ -45709,4 +45864,3 @@ var index = definePlugin(() => {
 });
 
 export { index as default };
-//# sourceMappingURL=index.js.map

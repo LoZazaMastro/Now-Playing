@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import importlib.util
 import asyncio
+import contextlib
 import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import types
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -363,6 +366,153 @@ def test_spotify_surround_updates_without_restarting_playback() -> None:
     assert "Arc<RwLock<SurroundConfig>>" in bridge_source
 
 
+def test_spotify_audio_output_is_lazy_and_self_healing() -> None:
+    backend_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    bridge_source = (ROOT / "SpotifyPlaybackBridge" / "src" / "main.rs").read_text(encoding="utf-8")
+    assert "struct DynamicRodioSink" in bridge_source
+    assert "sink: None" in bridge_source
+    assert "fn ensure_output(&mut self)" in bridge_source
+    assert ".with_error_callback" in bridge_source
+    assert "snapshot.audio_recoveries" in bridge_source
+    assert "stream_generation" in bridge_source
+    assert "if self.stream_failed.load(Ordering::Acquire)" in bridge_source
+    assert "snapshot.get(\"audioReady\")" in backend_source
+    assert "snapshot.get(\"audioPackets\")" in backend_source
+
+
+def test_spotify_cached_library_pages_stay_bounded() -> None:
+    payload = {"items": [{"id": str(index)} for index in range(7640)], "total": 7640}
+    page = backend.Plugin._spotify_library_page(payload, "tracks", 0, 240)
+    assert len(page["items"]) == 240
+    assert page["total"] == 7640
+    assert page["next"] == "cached"
+    assert len(payload["items"]) == 7640, "Paging must not mutate the complete cache"
+    assert page["items"][0] is payload["items"][0], "Paging must not deep-copy thousands of entries"
+
+
+def test_spotify_network_round_trips_can_overlap() -> None:
+    plugin = backend.Plugin.__new__(backend.Plugin)
+    plugin._spotify_request_lock = threading.RLock()
+    plugin._spotify_cache_lock = threading.Lock()
+    plugin._spotify_api_cache_generation = 0
+    plugin._spotify_min_request_interval = 0.0
+    plugin._spotify_last_request_at = 0.0
+    plugin._spotify_api_call_total = 0
+    plugin._spotify_api_call_times = []
+    plugin._spotify_scraper_api_sync = lambda *_args: None
+    plugin._spotify_access_token = lambda *_args: "test-token"
+    plugin._spotify_rate_limit_status_sync = lambda: {"active": False}
+    plugin._spotify_store_cached_response = lambda *_args: None
+    plugin._spotify_cached_response = lambda *_args: None
+
+    active = 0
+    maximum_active = 0
+    counter_lock = threading.Lock()
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            nonlocal active, maximum_active
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.08)
+            return self
+
+        def __exit__(self, *_args):
+            nonlocal active
+            with counter_lock:
+                active -= 1
+
+        @staticmethod
+        def read():
+            return b"{}"
+
+    original_urlopen = backend.urllib.request.urlopen
+    backend.urllib.request.urlopen = lambda *_args, **_kwargs: Response()
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(plugin._spotify_api_sync, f"/test/{index}") for index in range(3)]
+            for future in futures:
+                assert future.result() == {}
+    finally:
+        backend.urllib.request.urlopen = original_urlopen
+    assert maximum_active >= 2, "Independent Spotify Home requests must not be serialized by network latency"
+
+
+def test_youtube_music_search_runs_categories_in_parallel() -> None:
+    with tempfile.TemporaryDirectory(prefix="now-playing-ytm-search-") as directory:
+        service = YouTubeMusicService(directory, str(ROOT / "vendor"), lambda _message: None)
+        active = 0
+        maximum_active = 0
+        counter_lock = threading.Lock()
+
+        class Client:
+            def search(self, *_args, **_kwargs):
+                nonlocal active, maximum_active
+                with counter_lock:
+                    active += 1
+                    maximum_active = max(maximum_active, active)
+                time.sleep(0.08)
+                with counter_lock:
+                    active -= 1
+                return []
+
+        service._independent_client_for_request = lambda *_args: Client()
+        service._request_context = lambda _client: contextlib.nullcontext()
+        result = service.search("parallel test")
+        assert set(result) == {"tracks", "albums", "artists", "playlists"}
+        assert maximum_active == 4
+
+
+def test_youtube_music_response_cache_survives_restart() -> None:
+    with tempfile.TemporaryDirectory(prefix="now-playing-ytm-cache-") as directory:
+        first = YouTubeMusicService(directory, str(ROOT / "vendor"), lambda _message: None)
+        expected = {"tracks": {"items": [{"id": "cached"}]}}
+        assert first._cached("search:cached", 900.0, lambda: expected) == expected
+        second = YouTubeMusicService(directory, str(ROOT / "vendor"), lambda _message: None)
+        assert second._cached(
+            "search:cached",
+            900.0,
+            lambda: (_ for _ in ()).throw(AssertionError("disk cache was not used")),
+        ) == expected
+
+
+def test_cache_invalidation_wins_over_inflight_results() -> None:
+    with tempfile.TemporaryDirectory(prefix="now-playing-cache-generation-") as directory:
+        plugin = backend.Plugin.__new__(backend.Plugin)
+        plugin._spotify_cache_lock = threading.Lock()
+        plugin._spotify_api_cache = {}
+        plugin._spotify_api_cache_generation = 1
+        plugin._spotify_cache_max_entries = 16
+        plugin._spotify_disk_cache_dir = directory
+        plugin._log = lambda _message: None
+        plugin._spotify_store_cached_response("stale", {"old": True}, 0)
+        assert "stale" not in plugin._spotify_api_cache
+        assert not os.path.exists(plugin._spotify_disk_cache_path("stale"))
+
+        plugin._spotify_library_cache_lock = threading.RLock()
+        plugin._spotify_library_cache_memory = None
+        plugin._spotify_library_cache_generation = 1
+        plugin._spotify_library_cache_path = os.path.join(directory, "spotify-library.json")
+        plugin._spotify_write_library_cache("tracks", {"items": []}, True, 0)
+        assert not os.path.exists(plugin._spotify_library_cache_path)
+
+        service = YouTubeMusicService(directory, str(ROOT / "vendor"), lambda _message: None)
+
+        def cleared_during_request():
+            service.clear_cache()
+            return {"old": True}
+
+        assert service._cached("home", 900.0, cleared_during_request) == {"old": True}
+        assert "home" not in service._cache
+        assert not os.path.exists(service._response_cache_path("home"))
+        stale_generation = service._cache_generation - 1
+        service._write_library_cache("tracks", {"items": []}, True, stale_generation)
+        assert not os.path.exists(service.library_cache_path)
+
+
 def test_youtube_music_chromium_header_normalization() -> None:
     copied_headers = (
         ":authority\r\nmusic.youtube.com\r\n"
@@ -396,8 +546,14 @@ def main() -> None:
     test_spotify_playback_helper_is_owned_by_plugin()
     test_spotify_playback_requires_streaming_scope_without_spawning()
     test_spotify_surround_updates_without_restarting_playback()
+    test_spotify_audio_output_is_lazy_and_self_healing()
+    test_spotify_cached_library_pages_stay_bounded()
+    test_spotify_network_round_trips_can_overlap()
+    test_youtube_music_search_runs_categories_in_parallel()
+    test_youtube_music_response_cache_survives_restart()
+    test_cache_invalidation_wins_over_inflight_results()
     test_youtube_music_chromium_header_normalization()
-    print("Runtime smoke tests OK: ranges, 6 external sources, generic and direct WinRT SMTC fallbacks, canonical empty snapshots, local state, Spotify bridge authority, zero Web API polling while the bridge is ready, integrated Spotify volume, playback scope guard, helper ownership, interactive-session MediaBridge recovery, Chromium YouTube Music headers, and in-process fanart.tv transports without external curl.")
+    print("Runtime smoke tests OK: ranges, 6 external sources, SMTC fallbacks, canonical snapshots, local state, Spotify bridge authority, lazy self-healing audio output, bounded library pages, overlapping Spotify requests, parallel YouTube Music search, restart-persistent generation-safe caches, playback scope guard, helper ownership, Chromium headers, and in-process fanart.tv transports.")
 
 
 if __name__ == "__main__":

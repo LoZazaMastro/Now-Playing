@@ -1,11 +1,11 @@
 {
   "name": "now-playing",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Console-style Spotify, YouTube Music, local and Windows media playback with fullscreen visuals for Decky Loader.",
   "author": "LoZazaMastro",
   "type": "module",
   "scripts": {
-    "build": "node scripts/validate-translations.mjs && tsc --noEmit --noUnusedLocals --noUnusedParameters && rollup -c",
+    "build": "node scripts/validate-translations.mjs && tsc --noEmit --noUnusedLocals --noUnusedParameters && rollup -c && node scripts/strip-sourcemap.mjs",
     "watch": "rollup -c -w",
     "package:win": "powershell -ExecutionPolicy Bypass -File ./package-win.ps1",
     "check:i18n": "node scripts/validate-translations.mjs",
